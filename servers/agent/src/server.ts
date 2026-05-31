@@ -283,9 +283,7 @@ async function proxyCredentialedCorsRequest(req: IncomingMessage, res: ServerRes
       }
     });
     if (origin) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.setHeader('Vary', 'Origin');
+      applyCredentialCorsHeaders(req, res, origin);
     }
     const data = Buffer.from(await upstreamResponse.arrayBuffer());
     res.end(data);
@@ -293,12 +291,22 @@ async function proxyCredentialedCorsRequest(req: IncomingMessage, res: ServerRes
     res.statusCode = 502;
     res.setHeader('Content-Type', 'application/json');
     if (origin) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.setHeader('Vary', 'Origin');
+      applyCredentialCorsHeaders(req, res, origin);
     }
     res.end(JSON.stringify({ error: 'proxy_failed' }));
   }
+}
+
+
+function applyCredentialCorsHeaders(req: IncomingMessage, res: ServerResponse, origin: string): void {
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  const requestedHeaders = typeof req.headers['access-control-request-headers'] === 'string'
+    ? req.headers['access-control-request-headers']
+    : 'Content-Type, Accept, Authorization, X-CSRF-Token';
+  res.setHeader('Access-Control-Allow-Headers', requestedHeaders);
+  res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
 }
 
 function loadSessions(storeFile: string | undefined): SessionRecord[] {
