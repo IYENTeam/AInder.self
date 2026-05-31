@@ -22,6 +22,20 @@ test('provider egress is blocked while raw upload lifecycle is unresolved', () =
   assert.equal(audit?.type, 'provider.egress_blocked');
 });
 
+test('store request context is written into audit and provider records', () => {
+  const store = createAinderStore({ seedDemo: true });
+  store.setRequestContext('req-123');
+  const upload = store.uploadKakaoTxt({ fileName: 'sample.txt' });
+  const sanitized = store.sanitizeConversation(upload.id);
+  store.generatePersonaProfile(sanitized.id);
+  store.clearRequestContext();
+
+  const auditEvents = store.state().auditEvents.slice(-3);
+  assert.ok(auditEvents.every((event) => event.requestId === 'req-123'));
+  const providerCall = store.state().providerCalls.at(-1);
+  assert.equal(providerCall?.requestId, 'req-123');
+});
+
 test('provider calls are persisted for profile generation, simulation, and Cocoun council', () => {
   const store = createAinderStore({ seedDemo: true });
   const upload = store.uploadKakaoTxt({ fileName: 'sample.txt' });
@@ -44,7 +58,7 @@ test('provider calls are persisted for profile generation, simulation, and Cocou
   ]);
 });
 
-test('persistent store reloads sessions and provider call history', () => {
+test('versioned file-backed store reloads sessions and provider call history', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ainder-store-'));
   const persistPath = join(dir, 'state.json');
   try {

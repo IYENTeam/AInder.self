@@ -162,16 +162,20 @@ async function handleRequest(
 
   if (req.method === 'GET' && url.pathname === '/admin/state') {
     if (!requireAdmin(req, res)) return;
+    store.setRequestContext(requestId);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ request_id: requestId, state: store.state() }));
+    store.clearRequestContext();
     return;
   }
 
   if (req.method === 'POST' && url.pathname === '/admin/reset') {
     if (!requireAdmin(req, res)) return;
+    store.setRequestContext(requestId);
     store.reset();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ request_id: requestId, cleared: true }));
+    store.clearRequestContext();
     return;
   }
 
@@ -202,6 +206,7 @@ async function handleRequest(
       mcp.close().catch(() => undefined);
     });
 
+    store.setRequestContext(requestId);
     try {
       console.log('[mcp-ainder] mcp request', { request_id: requestId });
       await mcp.connect(transport);
@@ -220,6 +225,8 @@ async function handleRequest(
           }),
         );
       }
+    } finally {
+      store.clearRequestContext();
     }
     return;
   }

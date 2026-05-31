@@ -230,6 +230,8 @@ export interface AinderState {
 export interface AinderStore {
   state(): AinderState;
   persist(): void;
+  setRequestContext(requestId: string | null): void;
+  clearRequestContext(): void;
   reset(): void;
   createUser(userId: string, password: string): User;
   login(userId: string, password: string): User | null;
@@ -272,7 +274,6 @@ export interface AinderStore {
   requestReportReveal(reportId: string): MatchReport;
   consentReportReveal(reportId: string, consent: boolean): MatchReport;
   getMatchReport(reportId: string): MatchReport | null;
-  persist(): void;
   audit(type: AuditEventType, subjectId?: string | null, userId?: string | null): AuditEvent;
 }
 
@@ -358,13 +359,14 @@ function assertExternalCallAllowed(
   state: AinderState,
   counters: Map<string, number>,
   userId: string,
+  requestId: string | null,
 ): void {
   const pending = state.uploads.some(
     (u) => u.userId === userId && u.rawDeletionStatus === 'pending',
   );
   if (pending) {
     createAuditEvent(state, counters, {
-      requestId: null,
+      requestId,
       type: 'provider.egress_blocked',
       userId,
       subjectId: null,
@@ -372,7 +374,7 @@ function assertExternalCallAllowed(
     throw new Error('External calls are blocked until raw deletion or retention decision is complete.');
   }
   createAuditEvent(state, counters, {
-    requestId: null,
+    requestId,
     type: 'provider.egress_allowed',
     userId,
     subjectId: userId,
@@ -414,10 +416,11 @@ function recordProviderCall(
   purpose: string,
   status: ProviderStatus,
   userId: string | null,
+  requestId: string | null,
 ): ProviderCallRecord {
   const record: ProviderCallRecord = {
     id: nextId('provider-call', counters),
-    requestId: null,
+    requestId,
     provider,
     purpose,
     status,
@@ -426,7 +429,7 @@ function recordProviderCall(
   };
   state.providerCalls.push(record);
   createAuditEvent(state, counters, {
-    requestId: null,
+    requestId,
     type: status === 'providerFailure' ? 'provider.egress_blocked' : 'provider.call',
     userId,
     subjectId: record.id,
@@ -581,6 +584,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
   state.providerCalls ??= [];
   const counters = new Map<string, number>();
   primeCounters(state, counters);
+  let currentRequestId: string | null = null;
 
   const persist = (): void => {
     if (opts.persistPath === undefined) return;
@@ -595,7 +599,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
   const audit = (type: AuditEventType, subjectId: string | null = null, userId: string | null = state.currentUserId || null): AuditEvent => {
     const event: AuditEvent = {
       id: nextId('audit', counters),
-      requestId: null,
+      requestId: currentRequestId,
       type,
       userId,
       subjectId,
@@ -627,6 +631,13 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
 
   const api: AinderStore = {
     state: redactedState,
+    persist,
+    setRequestContext(requestId) {
+      currentRequestId = requestId;
+    },
+    clearRequestContext() {
+      currentRequestId = null;
+    },
     reset() {
       state = opts.seedDemo ? createSeedState() : createEmptyState();
       state.sessions ??= [];
@@ -696,7 +707,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         createdAt: now(),
       });
       createAuditEvent(state, counters, {
-        requestId: null,
+        requestId: currentRequestId,
         type: 'consent.recorded',
         userId: state.currentUserId || null,
         subjectId: state.currentUserId || null,
@@ -756,7 +767,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
           createdAt: now(),
         });
           createAuditEvent(state, counters, {
-            requestId: null,
+            requestId: currentRequestId,
             type: 'upload.raw_retained',
             userId: upload.userId,
             subjectId: upload.id,
@@ -765,7 +776,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         upload.rawText = null;
         upload.rawDeletionStatus = 'deleted';
         createAuditEvent(state, counters, {
-          requestId: null,
+          requestId: currentRequestId,
           type: 'upload.raw_deleted',
           userId: upload.userId,
           subjectId: upload.id,
@@ -791,7 +802,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
       return item;
     },
     generatePersonaProfile(sanitizedConversationId) {
-      assertExternalCallAllowed(state, counters, state.currentUserId);
+      assertExternalCallAllowed(state, counters, state.currentUserId, currentRequestId);
       const sanitized = state.sanitizedConversations.find((c) => c.id === sanitizedConversationId);
       if (!sanitized) throw new Error('Sanitized conversation not found.');
       const traits: PersonaTrait[] = [
@@ -839,7 +850,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         publishedAt: null,
       };
       state.personaProfiles.push(profile);
-      recordProviderCall(state, counters, 'openai', 'persona_profile_generation', 'providerSuccess', sanitized.userId);
+      recordProviderCall(state, counters, 'openai', 'persona_profile_generation', 'providerSuccess', sanitized.userId, currentRequestId);
       return profile;
     },
     getPersonaReviewState(profileId) {
@@ -962,7 +973,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
       };
     },
     startDirectPersonaChat(targetUserId) {
-      assertExternalCallAllowed(state, counters, state.currentUserId);
+      assertExternalCallAllowed(state, counters, state.currentUserId, currentRequestId);
       const conversation: PersonaConversation = {
         id: nextId('conversation', counters),
         requesterId: state.currentUserId,
@@ -981,7 +992,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         providerStatus: 'seededFallback',
       };
       state.conversations.push(conversation);
-      recordProviderCall(state, counters, 'openai', 'direct_persona_chat', conversation.providerStatus, conversation.requesterId);
+      recordProviderCall(state, counters, 'openai', 'direct_persona_chat', conversation.providerStatus, conversation.requesterId, currentRequestId);
       return conversation;
     },
     sendDirectPersonaMessage(conversationId, message) {
@@ -1023,7 +1034,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
       );
     },
     runToblSimulationTurns(conversationId, turnCount) {
-      assertExternalCallAllowed(state, counters, state.currentUserId);
+      assertExternalCallAllowed(state, counters, state.currentUserId, currentRequestId);
       const conversation = state.conversations.find((c) => c.id === conversationId);
       if (!conversation) throw new Error('Conversation not found.');
       const target = Math.min(50, conversation.turnCount + turnCount);
@@ -1044,7 +1055,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
       conversation.watchouts = ['빠른 약속 제안은 부담일 수 있음', '농담 강도는 천천히 맞추는 편이 안전함'];
       conversation.firstMessageSuggestions = ['처음 친해질 때 편한 대화 속도는 어떤 편이에요?', '요즘 오래 이야기해도 지치지 않는 주제가 있어요?'];
       conversation.providerStatus = 'providerSuccess';
-      recordProviderCall(state, counters, 'tobl', 'persona_simulation', conversation.providerStatus, conversation.requesterId);
+      recordProviderCall(state, counters, 'tobl', 'persona_simulation', conversation.providerStatus, conversation.requesterId, currentRequestId);
       return conversation;
     },
     continuePersonaExploration(conversationId, additionalTurnCount) {
@@ -1170,7 +1181,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         }),
       };
       state.councilRuns.push(run);
-      recordProviderCall(state, counters, 'cocoun', 'friend_persona_council', run.providerStatus, state.currentUserId || null);
+      recordProviderCall(state, counters, 'cocoun', 'friend_persona_council', run.providerStatus, state.currentUserId || null, currentRequestId);
       report.councilRunId = run.id;
       return run;
     },
@@ -1236,7 +1247,6 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         },
       };
     },
-    persist,
     audit,
   };
 

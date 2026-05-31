@@ -12,9 +12,9 @@
     "test:security": "tsx --test src/server.test.ts"
   },
   "dependencies": {
-    "@openai/agents": "^0.0.13",
     "@ggui-ai/agent-server": "^0.2.0-alpha.4",
     "@ggui-ai/protocol": "^0.2.0-alpha.4",
+    "@openai/agents": "^0.0.13",
     "dotenv": "^16.4.5",
     "zod": "^3.23.0"
   },
