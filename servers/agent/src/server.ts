@@ -274,6 +274,7 @@ async function proxyCredentialedCorsRequest(req: IncomingMessage, res: ServerRes
       headers: req.headers as Record<string, string>,
       // Node fetch requires this when proxying IncomingMessage bodies.
       ...(body ? { body, duplex: 'half' as const } : {}),
+      redirect: 'manual',
     });
     res.statusCode = upstreamResponse.status;
     res.statusMessage = upstreamResponse.statusText;
@@ -288,6 +289,7 @@ async function proxyCredentialedCorsRequest(req: IncomingMessage, res: ServerRes
     const data = Buffer.from(await upstreamResponse.arrayBuffer());
     res.end(data);
   } catch (err) {
+    console.error('[ainder-agent] credential CORS proxy failed:', err);
     res.statusCode = 502;
     res.setHeader('Content-Type', 'application/json');
     if (origin) {
