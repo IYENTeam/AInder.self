@@ -1,0 +1,56 @@
+packages:
+  # One agent backend — the SDK-specific server that talks to the LLM
+  # and orchestrates the MCP loop.
+  - "servers/agent"
+  # One ggui server — turns the agent's render calls into a live UI.
+  - "servers/ggui"
+  # MCP servers exposing domain tools. Plural — copy `todo/` and add
+  # your own (`mcps/restaurant/`, `mcps/calendar/`) as your app grows.
+  - "servers/mcps/*"
+  # Frontend SPAs. Plural so you can ship an admin panel alongside the
+  # main app without restructuring.
+  - "apps/*"
+  # Blueprints and gadgets you author with /blueprint and /gadget.
+  # These globs match nothing until you scaffold one.
+  - "blueprints/*"
+  - "gadgets/*"
+
+# pnpm 11 defaults that would otherwise prompt during `pnpm dev:*` runs
+# in non-TTY contexts (CI, Railway buildpacks).
+verifyDepsBeforeRun: false
+strictDepBuilds: false
+autoInstallPeers: true
+minimumReleaseAgeExclude:
+  - '@ggui-ai/agent-runtime@0.2.0-alpha.4'
+  - '@ggui-ai/agent-server@0.2.0-alpha.4'
+  - '@ggui-ai/artifact-manifest@0.2.0-alpha.4'
+  - '@ggui-ai/cli@0.2.0-alpha.4'
+  - '@ggui-ai/console@0.2.0-alpha.4'
+  - '@ggui-ai/design@0.2.0-alpha.4'
+  - '@ggui-ai/dev-stack@0.2.0-alpha.4'
+  - '@ggui-ai/embedding-local@0.2.0-alpha.4'
+  - '@ggui-ai/gadget-signing@0.2.0-alpha.4'
+  - '@ggui-ai/gadgets@0.2.0-alpha.4'
+  - '@ggui-ai/iframe-runtime@0.2.0-alpha.4'
+  - '@ggui-ai/live-channel@0.2.0-alpha.4'
+  - '@ggui-ai/mcp-server-core@0.2.0-alpha.4'
+  - '@ggui-ai/mcp-server-handlers@0.2.0-alpha.4'
+  - '@ggui-ai/mcp-server@0.2.0-alpha.4'
+  - '@ggui-ai/negotiator@0.2.0-alpha.4'
+  - '@ggui-ai/preview-a2ui@0.2.0-alpha.4'
+  - '@ggui-ai/project-config@0.2.0-alpha.4'
+  - '@ggui-ai/protocol@0.2.0-alpha.4'
+  - '@ggui-ai/react@0.2.0-alpha.4'
+  - '@ggui-ai/registry-core@0.2.0-alpha.4'
+  - '@ggui-ai/sandbox@0.2.0-alpha.4'
+  - '@ggui-ai/shared@0.2.0-alpha.4'
+  - '@ggui-ai/ui-gen@0.2.0-alpha.4'
+  - '@ggui-ai/ui-registry@0.2.0-alpha.4'
+  - '@ggui-ai/ui-visual-tester@0.2.0-alpha.4'
+  - '@ggui-ai/wire@0.2.0-alpha.4'
+allowBuilds:
+  '@google/genai': set this to true or false
+  esbuild: set this to true or false
+  onnxruntime-node: set this to true or false
+  protobufjs: set this to true or false
+  sharp: set this to true or false

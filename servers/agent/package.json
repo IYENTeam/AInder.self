@@ -1,0 +1,25 @@
+{
+  "name": "@ainder/agent-openai-sdk",
+  "version": "0.0.1",
+  "description": "Brand-agnostic OpenAI Agents SDK backend. Boots an HTTP API (default port 6791) + sandbox-proxy server (default port 7791). Pure backend — no bundled frontend; pair with @ggui-samples/app-ggui-basic-web (or any MCP-Apps-spec frontend) via VITE_AGENT_ENDPOINT_URL. Real LLM via OPENAI_API_KEY. Not published.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit"
+  },
+  "dependencies": {
+    "@openai/agents": "^0.0.13",
+    "@ggui-ai/agent-server": "^0.2.0-alpha.4",
+    "@ggui-ai/protocol": "^0.2.0-alpha.4",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema": "1",
+  "protocol": "draft-2026-05-23",
+  "app": {
+    "slug": "sample-ggui-default",
+    "name": "Sample ggui — default"
+  },
+  "generation": {
+    "model": "openai:gpt-5.4-mini"
+  },
+  "theme": {
+    "preset": "indigo",
+    "mode": "dark"
+  }
+}
