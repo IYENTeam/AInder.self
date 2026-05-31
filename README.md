@@ -61,16 +61,31 @@ pnpm install
 
 ### 2) 환경 변수 설정
 
-`.env.local`에 **지금 구현 기준 필수값**은 이것뿐입니다.
+`.env.local`에 **로컬 개발 최소값**은 이것입니다.
 
 ```bash
 OPENAI_API_KEY=your_key_here
 ```
 
-추가 메모:
-- `GGUI_AINDER_MCP_URL`은 기본값이 이미 `.env.example`에 들어 있으므로 보통 그대로 두면 됩니다.
-- 현재 저장소의 Cocoun / tobl.ai 흐름은 **demo / seeded fallback 중심**이라 별도 `COCOUN_API_KEY`, `TOBL_API_KEY`를 아직 코드에서 필수로 읽지 않습니다.
-- 실제 외부 연동으로 바꿀 때는 그때 provider key를 추가하면 됩니다.
+로컬 개발 보조값:
+- `GGUI_AINDER_MCP_URL`은 `.env.example` 기본값을 그대로 써도 됩니다.
+- `AINDER_BOOTSTRAP_USER`, `AINDER_BOOTSTRAP_PASSWORD`는 현재 secure-session auth bridge의 로컬 기본 계정입니다.
+- 현재 Cocoun / tobl.ai 흐름은 demo / seeded fallback 중심이라 local happy path에서는 별도 provider key가 없어도 됩니다.
+
+프로덕션/프리뷰 기준으로는 추가 계약이 있습니다.
+- `VITE_AGENT_ENDPOINT_URL`
+- `AINDER_ALLOWED_ORIGINS`
+- `AINDER_SESSION_SECRET`
+- `AINDER_ADMIN_TOKEN`
+- `AINDER_STORE_PATH`
+- `AINDER_BOOTSTRAP_USER`
+- `AINDER_BOOTSTRAP_PASSWORD_HASH`
+- 필요 시 `COCOUN_API_KEY`, `TOBL_API_KEY`
+
+검증 명령:
+```bash
+pnpm env:validate:production
+```
 
 ### 3) 개발 서버 실행
 

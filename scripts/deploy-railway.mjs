@@ -30,6 +30,7 @@
  * your first live run.
  */
 import { execFileSync } from 'node:child_process';
+import { scryptSync } from 'node:crypto';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -66,10 +67,29 @@ if (llmKeys.length === 0 && !DRY) {
   die('OPENAI_API_KEY is required. Add it to .env.local.');
 }
 if (!DRY) {
-  const required = ['AINDER_SESSION_SECRET', 'AINDER_ADMIN_TOKEN', 'COCOUN_API_KEY', 'TOBL_API_KEY'];
+  const required = [
+    'AINDER_SESSION_SECRET',
+    'AINDER_ADMIN_TOKEN',
+    'AINDER_STORE_PATH',
+    'AINDER_BOOTSTRAP_USER',
+    'COCOUN_API_KEY',
+    'TOBL_API_KEY',
+  ];
   const missing = required.filter((name) => !process.env[name]);
+  if (!process.env.AINDER_BOOTSTRAP_PASSWORD_HASH && !process.env.AINDER_BOOTSTRAP_PASSWORD) {
+    missing.push('AINDER_BOOTSTRAP_PASSWORD_HASH or AINDER_BOOTSTRAP_PASSWORD');
+  }
   if (missing.length > 0) die(`Missing production deploy env: ${missing.join(', ')}`);
 }
+
+const bootstrapPasswordHash =
+  process.env.AINDER_BOOTSTRAP_PASSWORD_HASH ??
+  (() => {
+    const password = process.env.AINDER_BOOTSTRAP_PASSWORD;
+    if (!password) return undefined;
+    const salt = 'railway-bootstrap-salt';
+    return `scrypt:v1:${salt}:${scryptSync(password, salt, 64).toString('base64url')}`;
+  })();
 
 // --- railway CLI invocation (prefer a global `railway`, else pnpm dlx) ------
 function resolveRailway() {
@@ -161,8 +181,9 @@ function serviceVars(svc, services) {
   if (svc.role === 'agent') {
     vars.NODE_ENV = 'production';
     vars.AINDER_SESSION_SECRET = process.env.AINDER_SESSION_SECRET;
-    vars.AINDER_ALLOWED_ORIGINS = process.env.AINDER_ALLOWED_ORIGINS ?? `https://${publicRef(services.find((s) => s.role === 'web') ?? svc)}`;
-    vars.VITE_AGENT_ENDPOINT_URL = `https://${publicRef(svc)}`;
+    vars.AINDER_BOOTSTRAP_USER = process.env.AINDER_BOOTSTRAP_USER;
+    vars.AINDER_BOOTSTRAP_PASSWORD_HASH = bootstrapPasswordHash;
+    vars.AINDER_SESSION_STORE_PATH = process.env.AINDER_SESSION_STORE_PATH ?? '/data/ainder-agent-sessions.json';
     if (process.env.OPENAI_MODEL) vars.OPENAI_MODEL = process.env.OPENAI_MODEL;
     if (process.env.MODEL) vars.MODEL = process.env.MODEL;
     const ggui = services.find((s) => s.role === 'ggui');
@@ -171,26 +192,20 @@ function serviceVars(svc, services) {
       vars[mcpEnvName(mcp)] = `http://${privateRef(mcp)}:${mcp.port}/mcp`;
     }
     const web = services.find((s) => s.role === 'web');
-    const agent = services.find((s) => s.role === 'agent');
     if (web) vars.AINDER_ALLOWED_ORIGINS = `https://${publicRef(web)}`;
-    if (agent) vars.AINDER_SESSION_SECRET = process.env.AINDER_SESSION_SECRET;
-    vars.AINDER_ALLOW_DEMO_BOOTSTRAP = 'false';
-    vars.AINDER_ENABLE_ADMIN_DEBUG = 'false';
+    vars.AINDER_SEED_DEMO = 'false';
   }
   if (svc.role === 'mcp') {
     const web = services.find((s) => s.role === 'web');
     const agent = services.find((s) => s.role === 'agent');
-    vars.AINDER_STATE_FILE = '/data/ainder-state.json';
-    vars.AINDER_ENABLE_ADMIN_ENDPOINTS = 'false';
-    vars.AINDER_ENABLE_DEMO_BOOTSTRAP = 'false';
-    vars.AINDER_ALLOWED_ORIGINS = [web, agent].filter(Boolean).map((s) => `https://${publicRef(s)}`).join(',');
-  }
-  if (svc.role === 'mcp') {
     vars.NODE_ENV = 'production';
     vars.AINDER_SEED_DEMO = 'false';
     vars.AINDER_STORE_PATH = process.env.AINDER_STORE_PATH ?? '/data/ainder-store.json';
     vars.AINDER_ADMIN_TOKEN = process.env.AINDER_ADMIN_TOKEN;
-    vars.AINDER_ALLOWED_ORIGINS = process.env.AINDER_ALLOWED_ORIGINS ?? services.filter((s) => s.public).map((s) => `https://${publicRef(s)}`).join(',');
+    vars.AINDER_ALLOWED_ORIGINS = [web, agent]
+      .filter(Boolean)
+      .map((s) => `https://${publicRef(s)}`)
+      .join(',');
     vars.COCOUN_API_KEY = process.env.COCOUN_API_KEY;
     vars.TOBL_API_KEY = process.env.TOBL_API_KEY;
   }

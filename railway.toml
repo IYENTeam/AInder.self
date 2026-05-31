@@ -1,62 +1,48 @@
 # Railway deploy config — AInder production baseline
 #
-# Deploys the current in-place topology as four Railway services:
+# Topology:
+#   agent  → servers/agent       — OpenAI Agents SDK backend + cookie session auth bridge
+#   ggui   → servers/ggui        — ggui MCP/render server
+#   ainder → servers/mcps/todo   — AInder domain MCP server
+#   web    → apps/web            — Vite SPA frontend
 #
-#   agent  → servers/agent          — OpenAI Agents SDK backend (HTTP API + sandbox-proxy)
-#   ggui   → servers/ggui           — `ggui serve` MCP server (renders UI)
-#   ainder → servers/mcps/todo      — AInder domain MCP server
-#   web    → apps/web               — Vite SPA frontend
-#
-# Railway wires services together via `${{<svc>.PRIVATE_DOMAIN}}` (internal
-# Railway DNS, IPv6, no egress cost). Each service builds from the monorepo
-# root and starts via its own `pnpm --filter` command.
-#
-# How to deploy:
-#   1. Create a new Railway project from this repo.
-#   2. Create FOUR services in the project, one per [services.<name>] block below.
-#      Railway's "deploy from repo" flow picks up these settings automatically.
-#   3. Set the secret noted under [services.agent.env] / [services.ggui.env] —
-#      your OPENAI_API_KEY drives BOTH the agent and ggui's UI generation
-#      (servers/ggui/ggui.json is set to an OpenAI model).
-#   4. Open the web service's public URL.
-#
-# Future: when guuey.com ships, drop a `guuey.json` next to this file. Railway
-# stays as a fallback for self-hosters who want raw IaaS.
+# This file is documentation + a deploy hint, not the sole source of truth.
+# The real env contract is enforced by:
+# - `scripts/validate-production-env.mjs`
+# - `scripts/deploy-railway.mjs`
 
 [build]
 builder = "NIXPACKS"
 
-# ── agent ────────────────────────────────────────────────────────────────
-# The SDK-specific backend. Public — fronts both the SSE chat stream and
-# the relay/snapshot endpoints the SPA hits from the browser.
 [services.agent]
 buildCommand = "pnpm install --frozen-lockfile && pnpm --filter ./servers/agent build"
 startCommand = "pnpm --filter ./servers/agent start"
 
 [services.agent.env]
 PORT = "6791"
-GGUI_MCP_URL = "https://${{ggui.PRIVATE_DOMAIN}}:${{ggui.PORT}}/mcp"
-GGUI_TODO_MCP_URL = "https://${{todo.PRIVATE_DOMAIN}}:${{todo.PORT}}/mcp"
-# Required secret — set in Railway dashboard.
-# OPENAI_API_KEY = "sk-..."
+NODE_ENV = "production"
+GGUI_MCP_URL = "http://${{ggui.RAILWAY_PRIVATE_DOMAIN}}:6781/mcp"
+GGUI_AINDER_MCP_URL = "http://${{todo.RAILWAY_PRIVATE_DOMAIN}}:6782/mcp"
+AINDER_ALLOWED_ORIGINS = "https://${{web.RAILWAY_PUBLIC_DOMAIN}}"
+AINDER_SESSION_STORE_PATH = "/data/ainder-agent-sessions.json"
+AINDER_SEED_DEMO = "false"
+# Required secrets set in Railway dashboard:
+# OPENAI_API_KEY=
+# AINDER_SESSION_SECRET=
+# AINDER_BOOTSTRAP_USER=
+# AINDER_BOOTSTRAP_PASSWORD_HASH=
 
-# ── ggui ─────────────────────────────────────────────────────────────────
-# `ggui serve` — generates and serves the UI the agent renders. Public so
-# the SPA (running in the user's browser) can iframe its /r/<shortCode>
-# routes directly.
 [services.ggui]
 buildCommand = "pnpm install --frozen-lockfile"
 startCommand = "pnpm --filter ./servers/ggui start"
 
 [services.ggui.env]
 PORT = "6781"
-# ggui's own LLM-driven UI generator needs an LLM key. ggui.json is set to
-# an OpenAI model, so set the same OPENAI_API_KEY here as the agent uses.
-# OPENAI_API_KEY = "sk-..."
+NODE_ENV = "production"
+GGUI_PUBLIC_BASE_URL = "https://${{ggui.RAILWAY_PUBLIC_DOMAIN}}"
+# Required secret set in Railway dashboard:
+# OPENAI_API_KEY=
 
-# ── ainder domain MCP ─────────────────────────────────────────────────────
-# Private — only the agent talks to it. Production requires durable state and
-# explicit browser/service origin policy.
 [services.todo]
 buildCommand = "pnpm install --frozen-lockfile && pnpm --filter ./servers/mcps/todo build"
 startCommand = "pnpm --filter ./servers/mcps/todo start"
@@ -64,18 +50,18 @@ startCommand = "pnpm --filter ./servers/mcps/todo start"
 [services.todo.env]
 PORT = "6782"
 NODE_ENV = "production"
-AINDER_STATE_FILE = "/data/ainder-state.json"
-AINDER_ENABLE_ADMIN_ENDPOINTS = "false"
-AINDER_ENABLE_DEMO_BOOTSTRAP = "false"
+AINDER_STORE_PATH = "/data/ainder-store.json"
+AINDER_ADMIN_TOKEN = "set-in-railway"
+AINDER_SEED_DEMO = "false"
 AINDER_ALLOWED_ORIGINS = "https://${{web.RAILWAY_PUBLIC_DOMAIN}},https://${{agent.RAILWAY_PUBLIC_DOMAIN}}"
+# Required secrets set in Railway dashboard:
+# COCOUN_API_KEY=
+# TOBL_API_KEY=
 
-# ── web (frontend SPA) ───────────────────────────────────────────────────
-# Vite build → `vite preview` (or any static-host adapter). Public.
 [services.web]
 buildCommand = "pnpm install --frozen-lockfile && pnpm --filter ./apps/web build"
 startCommand = "pnpm --filter ./apps/web preview --host 0.0.0.0 --port $PORT"
 
 [services.web.env]
 PORT = "6890"
-# Vite-prefixed so the value is inlined into the browser bundle at build time.
 VITE_AGENT_ENDPOINT_URL = "https://${{agent.RAILWAY_PUBLIC_DOMAIN}}"
