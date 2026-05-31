@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: sk-test
+      VITE_AGENT_ENDPOINT_URL: https://app.example.com
+      GGUI_MCP_URL: https://ggui.example.com/mcp
+      GGUI_AINDER_MCP_URL: https://mcp.example.com/mcp
+      AINDER_ALLOWED_ORIGINS: https://app.example.com
+      AINDER_SESSION_SECRET: abcdefghijklmnopqrstuvwxyz012345
+      AINDER_ADMIN_TOKEN: admin-secret-token
+      AINDER_STORE_PATH: /tmp/ainder-store.json
+      AINDER_SESSION_STORE_PATH: /tmp/ainder-agent-sessions.json
+      AINDER_BOOTSTRAP_USER: admin
+      COCOUN_API_KEY: cocoun_test_key
+      TOBL_API_KEY: tobl_test_key
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.2.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Derive bootstrap password hash
+        run: |
+          HASH=$(node -e "const {scryptSync}=require('node:crypto'); const salt='ci-salt'; console.log('scrypt:v1:'+salt+':'+scryptSync('secret-pass', salt, 64).toString('base64url'));" )
+          echo "AINDER_BOOTSTRAP_PASSWORD_HASH=$HASH" >> "$GITHUB_ENV"
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Validate production env contract
+        run: pnpm env:validate:production
+
+      - name: Build agent and MCP services
+        run: |
+          pnpm --filter ./servers/agent build
+          pnpm --filter ./servers/mcps/todo build
+
+      - name: Build production web bundle
+        run: pnpm build:web:production
+
+      - name: Enforce web bundle budget
+        run: pnpm bundle:check:web
