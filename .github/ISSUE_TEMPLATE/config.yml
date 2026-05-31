@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: AInder planning artifacts
+    url: https://github.com/IYENTeam/AInder.self/tree/main/.gjc
+    about: 기존 deep interview / ralplan 문서를 먼저 확인하세요.

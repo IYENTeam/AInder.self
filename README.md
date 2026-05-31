@@ -1,115 +1,172 @@
-# Agentic App Template — OpenAI Agents SDK
+# AInder
 
-Build **agentic apps** where the agent renders its own interactive UI — on the
-[ggui protocol](https://github.com/ggui-ai/ggui), powered by OpenAI's
-[Agents SDK](https://www.npmjs.com/package/@openai/agents).
+AInder is a mobile-first agentic matching app prototype built with **GGUI**, **OpenAI Agents SDK**, **tobl.ai-style persona simulation flow**, and **Cocoun friend-persona council reports**.
 
-> Don't clone this folder directly. Use the create tool:
->
-> ```bash
-> npx @ggui-ai/create-agentic-app --agent openai-agents-sdk my-app
-> ```
+핵심 아이디어는 단순 스와이프 매칭이 아니라:
 
-## What you get
+`대화 업로드 → 페르소나 생성/리뷰 → 비공개 페르소나 탐색 → 매칭 요청 → 수락 후 실제 대화 → 친구 페르소나 council 리포트`
 
-A pnpm monorepo with three backend servers + one frontend SPA, ready to run:
+입니다.
 
-| Directory             | What it is                                                          |
-| --------------------- | ------------------------------------------------------------------- |
-| `servers/agent`       | The agent — `@openai/agents` + an HTTP API the frontend hits.       |
-| `servers/ggui`        | A `ggui serve` config — turns the agent's render calls into a live UI. |
-| `servers/mcps/todo`   | A standalone AInder MCP server — matching/persona/report domain tools. |
-| `apps/web`            | A Vite SPA frontend that mounts the agent's renders in iframes.     |
+## 핵심 경험
 
-Together they demonstrate the full loop: you chat → the agent calls domain
-tools and renders a React UI → you click in that UI → the agent reacts.
+- **ID/비밀번호 로그인**
+- **카카오톡 `.txt` 업로드**
+- **개인정보 정제 후 페르소나 생성**
+- **GGUI 설명형 trait 카드 리뷰**
+  - confidence
+  - sanitized evidence snippets
+  - `public / private / hidden`
+- **모바일 스와이프 탐색**
+  - 왼쪽 스와이프 = 비공개 탐색 시작
+  - 상대에게 알림 안 감
+  - 매칭 즉시 생성 안 됨
+- **페르소나 탐색 2모드**
+  - 상대 페르소나와 직접 대화하기
+  - 내 페르소나로 대화시키기
+- **매칭 요청**
+  - 기본 첨부: 요약 + 좋은 장면 2~3개
+  - full transcript 기본 첨부 금지
+- **Cocoun 친구 페르소나 council 리포트**
+  - demo friend personas 기반
+  - 숫자 궁합 점수 없음
+  - 양쪽 동의 후 공개
 
-## Quick start
+## 현재 MVP 원칙
+
+- **builder-managed OpenAI key** 사용
+  - MVP normal flow에서는 사용자 BYOK 입력을 요구하지 않음
+- raw KakaoTalk text는 **OpenAI / GGUI / tobl.ai / Cocoun**으로 전달하지 않음
+- `hidden` field는 공개 프로필, persona-agent memory, council 입력에서 제외
+- 리포트는 평가 점수표가 아니라 **대화 가이드**
+
+## 저장소 구조
+
+| 경로 | 역할 |
+|---|---|
+| `servers/agent` | OpenAI Agents SDK 기반 agent backend |
+| `servers/ggui` | GGUI MCP/render server |
+| `servers/mcps/todo` | 현재 AInder 도메인 MCP 서버 구현 위치 |
+| `apps/web` | 웹 클라이언트 |
+| `.gjc/specs` | Deep Interview 스펙 |
+| `.gjc/plans` | RALPLAN consensus 계획 |
+
+## 실행 방법
+
+### 1) 의존성 설치
 
 ```bash
 pnpm install
-cp .env.example .env.local   # add your OPENAI_API_KEY
-pnpm dev                     # starts all four servers, then opens the app
 ```
 
-`pnpm dev` brings up the ggui server, your MCP servers, the agent, and the web
-app together and opens **http://localhost:6890** once it's ready (logs are
-hidden by default — add `--verbose` to stream them). Prefer separate terminals? Run
-`pnpm dev:ggui`, `pnpm dev:mcps` (every `servers/mcps/*`), `pnpm dev:agent`,
-and `pnpm dev:web` individually.
+### 2) 환경 변수 설정
 
-One key, one vendor: both the **agent** and the **ggui server** (which
-generates the UI) run on OpenAI, so a single `OPENAI_API_KEY` is all you need.
-To run ggui on a different provider, change `servers/ggui/ggui.json`'s
-`generation.model` and set that provider's key instead.
-
-## Deploy to Railway
+`.env.local`에 최소한 아래를 넣습니다.
 
 ```bash
-pnpm deploy:railway          # add -- --dry-run first to preview
+OPENAI_API_KEY=your_key_here
 ```
 
-One command provisions all four services on Railway, wires the public/private
-URLs between them, and pushes the API keys from `.env.local`. It needs a
-`RAILWAY_API_TOKEN` (an **account** token from
-https://railway.com/account/tokens) set in `.env.local`. Run
-`pnpm deploy:railway -- --dry-run` first to see exactly what it will do.
-Implementation: `scripts/deploy-railway.mjs`.
+기본 MCP wiring은 이미 잡혀 있습니다.
 
-## How to build your app
+```bash
+GGUI_AINDER_MCP_URL=http://localhost:6782/mcp
+```
 
-You own four layers — and, when you want them, two ggui power features.
+### 3) 개발 서버 실행
 
-### 1. Develop your agent
+```bash
+pnpm dev
+```
 
-Your agent lives in `servers/agent`. Start with its **system prompt**: that is
-where the agent's personality and domain reasoning live. A restaurant agent
-greets diners and reasons about menus; a support agent triages tickets. Write
-the prompt for *your* domain.
+기본 포트:
 
-Keep the prompt about *posture*, not mechanics — the ggui render flow teaches
-itself through the MCP tool descriptions.
+- Web: `http://localhost:6890`
+- Agent: `http://localhost:6790`
+- GGUI MCP: `http://localhost:6781/mcp`
+- AInder MCP: `http://localhost:6782/mcp`
 
-### 2. Give your agent tools — as MCP servers
+개별 실행도 가능합니다.
 
-`servers/mcps/todo` is the AInder example: a standalone MCP server exposing
-privacy-first matching, persona review, exploration, and report tools. Add more
-domain MCP servers under `servers/mcps/<domain>/`, or connect an existing MCP
-server directly when one already exists.
+```bash
+pnpm dev:ggui
+pnpm dev:mcps
+pnpm dev:ainder
+pnpm dev:agent
+pnpm dev:web
+```
 
-Either way, `pnpm dev` already starts every `servers/mcps/*` and the agent
-auto-registers each from a `GGUI_<NAME>_MCP_URL` env var — no wiring code. See
-`.reference/writing-mcp-tools.md` for the full path.
+## 데모 시나리오
 
-### 3. Customize the frontend
+현재 in-memory seed 기반으로 아래 happy path를 검증할 수 있습니다.
 
-`apps/web` is a Vite SPA that talks to your agent backend over HTTP. It uses
-`@ggui-ai/react`'s `<AppRenderer>` to mount the agent's renders in iframes.
-Edit `apps/web/src/App.tsx` to tweak the chat shell.
+1. 로그인
+2. 카카오톡 `.txt` 업로드
+3. 정제 및 raw 기본 삭제
+4. 페르소나 생성/리뷰
+5. public profile publish
+6. swipe deck 진입
+7. 왼쪽 스와이프 → 탐색 모드 선택
+8. 직접 대화 또는 tobl.ai-style 10턴 시뮬레이션
+9. 매칭 요청 생성
+10. 상대 수락
+11. Cocoun demo friend persona council report 생성
+12. 양쪽 동의 전까지 report locked
 
-### 4. Customize the ggui server
+## 구현 상태
 
-`servers/ggui/ggui.json` configures `ggui serve`. Set your default UI model,
-theme, declared blueprints + gadgets. See https://ggui.ai/docs/cli for the
-full reference.
+현재 구현된 핵심 영역:
 
-### Blueprints — cache your common screens
+- AInder in-memory domain store
+- MCP tool surface
+- builder-managed key 흐름
+- upload / sanitize / raw deletion flow
+- persona generation review state
+- public/private/hidden visibility model
+- swipe interest / persona exploration flow
+- match request context preview
+- accepted match handoff
+- Cocoun demo friend council state
+- report reveal consent gate
 
-A **blueprint** is a cached UI template for a recurring pattern (a login
-screen, an order summary). Author one with **`/blueprint`** (inside Claude
-Code), or by hand: `ggui blueprint create`, implement the TSX,
-`ggui blueprint publish`, `ggui blueprint install`.
+## 주요 문서
 
-### Gadgets — give the generator client-side libraries
+- Deep Interview spec: `.gjc/specs/deep-interview-ainder-workflows.md`
+- User workflow spec: `.gjc/specs/ainder-user-workflows.md`
+- Core flow spec: `.gjc/specs/ainder-core-flow.md`
+- RALPLAN consensus plan: `.gjc/plans/ainder-ralplan-consensus.md`
+- GGUI implementation plan: `.gjc/plans/ggui-track-implementation.md`
 
-A **gadget** wraps a browser library or capability — maps, charts, camera,
-clipboard — as a stable React hook/component the generated UI can use.
-Author one with **`/gadget`**, or by hand.
+## 검증
 
-## Reference
+실행한 검증:
 
-- [ggui docs](https://ggui.ai/docs) — protocol, blueprints, gadgets, CLI.
-- [OpenAI Agents SDK](https://www.npmjs.com/package/@openai/agents)
-- [ggui on GitHub](https://github.com/ggui-ai/ggui)
-- `.mcp.json` wires `https://mcp.ggui.ai/docs` as a project MCP server so
-  Claude Code can query the ggui docs MCP directly while you work.
+```bash
+pnpm typecheck
+```
+
+또한 핵심 happy path를 store 레벨에서 검증했습니다:
+
+- raw deletion = `deleted`
+- swipe가 match를 바로 만들지 않음
+- simulation = 10 turns
+- full transcript 기본 첨부 안 됨
+- match request 수락 후 match 생성
+- council report 상태 = `locked`
+
+## 한계 / 후속 작업
+
+현재는 해커톤 MVP 기준입니다.
+
+후속 작업 후보:
+
+- persistent DB
+- password/session hardening
+- 실제 friend persona owner opt-in UX
+- OpenAI / tobl.ai / Cocoun provider retry/observability
+- GGUI story polish
+- frontend shell을 AInder 전용 UI로 더 강하게 커스터마이즈
+
+## 라이선스
+
+Apache-2.0
