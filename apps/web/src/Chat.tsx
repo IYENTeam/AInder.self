@@ -140,9 +140,7 @@ function getInitialChatId(): string | undefined {
  */
 export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
 
-  const [chatId, setChatId] = useState<string | undefined>(() =>
-    getInitialChatId(),
-  );
+  const [chatId, setChatId] = useState<string | undefined>(undefined);
   const [authState, setAuthState] = useState<AuthState>('checking');
   const [loginUserId, setLoginUserId] = useState(import.meta.env.DEV ? 'demo' : '');
   const [loginPassword, setLoginPassword] = useState(import.meta.env.DEV ? 'demo' : '');
