@@ -9,7 +9,6 @@ import {
 import { useMcpAppsChat } from '@ggui-ai/react/chat-helpers';
 import {
   URL_CHAT_PARAM,
-  getInitialChatId,
   hasCookieSession,
   loginWithCookieSession,
   logoutCookieSession,
@@ -24,9 +23,7 @@ interface ChatProps {
 }
 
 export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
-  const [chatId, setChatId] = useState<string | undefined>(() =>
-    getInitialChatId(),
-  );
+  const [chatId, setChatId] = useState<string | undefined>(undefined);
   const [authState, setAuthState] = useState<AuthState>('checking');
   const [loginUserId, setLoginUserId] = useState(
     import.meta.env.DEV ? 'demo' : '',
@@ -120,7 +117,6 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     abort,
   } = useMcpAppsChat({
     chatEndpoint: `${agentEndpoint}/agent`,
-    snapshotEndpoint: `${agentEndpoint}/agent`,
     ...(chatId !== undefined ? { chatId } : {}),
     onChatAllocated,
     getAuthToken,
