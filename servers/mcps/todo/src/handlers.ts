@@ -43,6 +43,7 @@ function register(
   description: string,
   inputSchema: Record<string, z.ZodTypeAny>,
   handler: ToolHandler,
+  after?: (toolName: string) => void,
 ): void {
   server.registerTool(
     name,
@@ -52,18 +53,34 @@ function register(
       inputSchema,
       outputSchema: { result: z.unknown() },
     },
-    async (input) => jsonResult(handler(input as Record<string, unknown>)),
+    async (input) => {
+      const result = handler(input as Record<string, unknown>);
+      after?.(name);
+      return jsonResult(result);
+    },
   );
 }
 
 export function registerAinderTools(server: McpServer, opts: RegisterAinderToolsOptions): void {
   const { store } = opts;
+  const registerPersistent = (
+    server: McpServer,
+    name: string,
+    title: string,
+    description: string,
+    inputSchema: Record<string, z.ZodTypeAny>,
+    handler: ToolHandler,
+  ): void =>
+    register(server, name, title, description, inputSchema, handler, (toolName) => {
+      store.audit('tool.invoked', toolName);
+      store.persist();
+    });
 
-  register(server, 'ainder_state', 'AInder · State', 'Debug/demo state snapshot. Use to inspect the in-memory MVP state.', {}, () =>
+  registerPersistent(server, 'ainder_state', 'AInder · State', 'Debug/demo state snapshot. Use to inspect the in-memory MVP state.', {}, () =>
     store.state(),
   );
 
-  register(
+  registerPersistent(
     server,
     'create_user_account',
     'AInder · Create account',
@@ -72,7 +89,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.createUser(asString(input.userId), asString(input.password)),
   );
 
-  register(
+  registerPersistent(
     server,
     'login_with_password',
     'AInder · Login',
@@ -81,11 +98,11 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.login(asString(input.userId), asString(input.password)),
   );
 
-  register(server, 'get_current_user', 'AInder · Current user', 'Return the current demo user.', {}, () =>
+  registerPersistent(server, 'get_current_user', 'AInder · Current user', 'Return the current demo user.', {}, () =>
     store.currentUser(),
   );
 
-  register(
+  registerPersistent(
     server,
     'configure_builder_openai_key',
     'AInder · Configure builder OpenAI key',
@@ -94,7 +111,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     () => store.configureBuilderOpenAiKey(),
   );
 
-  register(
+  registerPersistent(
     server,
     'configure_cocoun_mcp_key',
     'AInder · Configure Cocoun MCP key',
@@ -103,7 +120,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     () => store.configureCocounKey(),
   );
 
-  register(
+  registerPersistent(
     server,
     'save_retention_preference',
     'AInder · Save raw retention preference',
@@ -112,7 +129,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.saveRetentionPreference(asBoolean(input.retainRawUploads)),
   );
 
-  register(
+  registerPersistent(
     server,
     'get_conversation_source_state',
     'AInder · Conversation source state',
@@ -121,7 +138,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.conversationSourceState(asString(input.userId, undefined as unknown as string)),
   );
 
-  register(
+  registerPersistent(
     server,
     'prepare_conversation_upload',
     'AInder · Prepare upload',
@@ -130,7 +147,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     () => ({ acceptedFileTypes: ['.txt'], primaryAction: '대화 내용 추가하기', rawDeletionDefault: true }),
   );
 
-  register(
+  registerPersistent(
     server,
     'upload_kakao_txt',
     'AInder · Upload KakaoTalk txt',
@@ -144,7 +161,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
       }),
   );
 
-  register(
+  registerPersistent(
     server,
     'sanitize_conversation',
     'AInder · Sanitize conversation',
@@ -153,7 +170,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.sanitizeConversation(asString(input.uploadId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'delete_raw_upload',
     'AInder · Delete raw upload',
@@ -162,7 +179,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.deleteRawUpload(asString(input.uploadId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'confirm_sanitized_conversation',
     'AInder · Confirm sanitized conversation',
@@ -171,7 +188,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.confirmSanitizedConversation(asString(input.sanitizedConversationId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'generate_persona_profile',
     'AInder · Generate persona profile',
@@ -180,7 +197,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.generatePersonaProfile(asString(input.sanitizedConversationId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'get_persona_generation_status',
     'AInder · Persona generation status',
@@ -189,7 +206,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.getPersonaReviewState(asString(input.profileId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'get_persona_review_state',
     'AInder · Persona review state',
@@ -198,7 +215,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.getPersonaReviewState(asString(input.profileId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'explain_persona_trait',
     'AInder · Explain persona trait',
@@ -210,7 +227,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     },
   );
 
-  register(
+  registerPersistent(
     server,
     'update_persona_section',
     'AInder · Update persona section',
@@ -219,7 +236,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.updatePersonaSection(asString(input.profileId), asString(input.traitId), asString(input.summary)),
   );
 
-  register(
+  registerPersistent(
     server,
     'set_persona_field_visibility',
     'AInder · Set trait visibility',
@@ -228,7 +245,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.setPersonaFieldVisibility(asString(input.profileId), asString(input.fieldId), visibility(input.visibility)),
   );
 
-  register(
+  registerPersistent(
     server,
     'generate_public_profile_preview',
     'AInder · Public profile preview',
@@ -237,7 +254,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.generatePublicProfilePreview(asString(input.profileId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'confirm_public_profile_fields',
     'AInder · Confirm public fields',
@@ -246,7 +263,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.confirmPublicProfileFields(asString(input.profileId), asStringArray(input.fieldIds)),
   );
 
-  register(
+  registerPersistent(
     server,
     'publish_public_profile',
     'AInder · Publish public profile',
@@ -255,11 +272,11 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.publishPublicProfile(asString(input.profileId)),
   );
 
-  register(server, 'get_swipe_deck', 'AInder · Swipe deck', 'Return mobile swipe deck from public profiles only.', {}, () =>
+  registerPersistent(server, 'get_swipe_deck', 'AInder · Swipe deck', 'Return mobile swipe deck from public profiles only.', {}, () =>
     store.getSwipeDeck(),
   );
 
-  register(
+  registerPersistent(
     server,
     'record_swipe_interest',
     'AInder · Record swipe interest',
@@ -268,7 +285,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.recordSwipeInterest(asString(input.targetUserId), asString(input.direction, 'left')),
   );
 
-  register(
+  registerPersistent(
     server,
     'open_persona_exploration',
     'AInder · Open persona exploration',
@@ -277,7 +294,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.openPersonaExploration(asString(input.targetUserId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'dismiss_profile',
     'AInder · Dismiss profile',
@@ -286,7 +303,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => ({ dismissed: true, targetUserId: asString(input.targetUserId), matchCreated: false }),
   );
 
-  register(
+  registerPersistent(
     server,
     'start_direct_persona_chat',
     'AInder · Start direct persona chat',
@@ -295,7 +312,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.startDirectPersonaChat(asString(input.targetUserId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'send_direct_persona_message',
     'AInder · Send direct persona message',
@@ -304,7 +321,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.sendDirectPersonaMessage(asString(input.conversationId), asString(input.message)),
   );
 
-  register(
+  registerPersistent(
     server,
     'start_tobl_persona_simulation',
     'AInder · Start tobl.ai simulation',
@@ -313,7 +330,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.startToblPersonaSimulation(asString(input.targetUserId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'run_tobl_simulation_turns',
     'AInder · Run tobl.ai turns',
@@ -322,7 +339,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.runToblSimulationTurns(asString(input.simulationId), asNumber(input.turnCount, 1)),
   );
 
-  register(
+  registerPersistent(
     server,
     'submit_persona_exploration_choice',
     'AInder · Submit exploration choice',
@@ -331,7 +348,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => ({ conversationId: asString(input.conversationId), choice: asString(input.choice) }),
   );
 
-  register(
+  registerPersistent(
     server,
     'continue_persona_exploration',
     'AInder · Continue exploration',
@@ -340,7 +357,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.continuePersonaExploration(asString(input.conversationId), asNumber(input.additionalTurnCount, 1)),
   );
 
-  register(
+  registerPersistent(
     server,
     'preview_match_request_context',
     'AInder · Preview match request context',
@@ -349,7 +366,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.previewMatchRequestContext(asString(input.conversationId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'create_match_request_from_conversation',
     'AInder · Create match request',
@@ -358,11 +375,11 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.createMatchRequestFromConversation(asString(input.conversationId), asString(input.messageToRecipient)),
   );
 
-  register(server, 'get_incoming_match_requests', 'AInder · Incoming match requests', 'Return incoming/pending demo match requests.', {}, () =>
+  registerPersistent(server, 'get_incoming_match_requests', 'AInder · Incoming match requests', 'Return incoming/pending demo match requests.', {}, () =>
     store.getIncomingMatchRequests(),
   );
 
-  register(
+  registerPersistent(
     server,
     'get_match_request',
     'AInder · Get match request',
@@ -371,7 +388,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.getMatchRequest(asString(input.matchRequestId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'respond_match_request',
     'AInder · Respond match request',
@@ -380,7 +397,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.respondMatchRequest(asString(input.matchRequestId), input.decision === 'reject' ? 'reject' : 'accept'),
   );
 
-  register(
+  registerPersistent(
     server,
     'open_real_conversation_if_matched',
     'AInder · Real conversation handoff',
@@ -389,11 +406,11 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.openRealConversationIfMatched(asString(input.matchId)),
   );
 
-  register(server, 'get_available_friend_personas', 'AInder · Friend personas', 'Return available demo friend personas for Cocoun council.', {}, () =>
+  registerPersistent(server, 'get_available_friend_personas', 'AInder · Friend personas', 'Return available demo friend personas for Cocoun council.', {}, () =>
     store.getAvailableFriendPersonas(),
   );
 
-  register(
+  registerPersistent(
     server,
     'generate_match_report',
     'AInder · Generate match report',
@@ -402,7 +419,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.generateMatchReport(asString(input.conversationId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'select_friend_persona_council_members',
     'AInder · Select council members',
@@ -411,7 +428,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.selectFriendPersonaCouncilMembers(asString(input.reportId), asStringArray(input.memberIds)),
   );
 
-  register(
+  registerPersistent(
     server,
     'invite_friend_persona_to_council',
     'AInder · Invite friend persona',
@@ -420,7 +437,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => ({ friendPersonaId: asString(input.friendPersonaId), scope: asString(input.scope, 'report'), consentStatus: 'pending' }),
   );
 
-  register(
+  registerPersistent(
     server,
     'start_cocoun_report_council',
     'AInder · Start Cocoun council',
@@ -429,7 +446,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.startCocounReportCouncil(asString(input.conversationId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'get_cocoun_report_council_status',
     'AInder · Cocoun council status',
@@ -438,7 +455,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.getCocounReportCouncilStatus(asString(input.reportId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'summarize_cocoun_council_output',
     'AInder · Summarize Cocoun output',
@@ -447,7 +464,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.summarizeCocounCouncilOutput(asString(input.reportId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'request_report_reveal',
     'AInder · Request report reveal',
@@ -456,7 +473,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.requestReportReveal(asString(input.reportId)),
   );
 
-  register(
+  registerPersistent(
     server,
     'consent_report_reveal',
     'AInder · Consent report reveal',
@@ -465,7 +482,7 @@ export function registerAinderTools(server: McpServer, opts: RegisterAinderTools
     (input) => store.consentReportReveal(asString(input.reportId), asBoolean(input.consent)),
   );
 
-  register(
+  registerPersistent(
     server,
     'get_match_report',
     'AInder · Get match report',

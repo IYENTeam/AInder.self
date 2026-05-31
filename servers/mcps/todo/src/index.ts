@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 /**
- * `@ainder/mcp-ainder` — standalone streamable-HTTP MCP server exposing the
- * AInder MVP domain tools behind production-safe request guards.
+ * `@ainder/mcp-ainder` — standalone streamable-HTTP MCP server
+ * exposing the AInder domain tools.
+ *
+ * Production mode is fail-closed: demo seed data and unauthenticated admin
+ * endpoints are local-dev only, state is file-backed through AINDER_STORE_PATH,
+ * and browser-facing requests must pass explicit origin/rate-limit guards.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -11,22 +15,24 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createAinderStore } from './store.js';
 import { registerAinderTools } from './handlers.js';
 
-const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const WINDOW_MS = 60_000;
-const DEFAULT_RATE_LIMIT = 120;
-const SENSITIVE_ROUTE_LIMIT = 30;
+type Store = ReturnType<typeof createAinderStore>;
 
-type RuntimeConfig = {
-  readonly nodeEnv: string;
-  readonly isProduction: boolean;
-  readonly port: number;
-  readonly allowDemoBootstrap: boolean;
-  readonly adminEnabled: boolean;
-  readonly allowedOrigins: ReadonlySet<string>;
-  readonly rateLimitMax: number;
-};
+const isProduction = process.env.NODE_ENV === 'production';
+const adminToken = process.env.AINDER_ADMIN_TOKEN?.trim();
+const storePath = process.env.AINDER_STORE_PATH?.trim();
+const seedDemo = !isProduction && process.env.AINDER_SEED_DEMO !== 'false';
+const allowedOrigins = parseCsv(process.env.AINDER_ALLOWED_ORIGINS ?? process.env.ALLOWED_ORIGINS);
+const rateWindowMs = Number.parseInt(process.env.AINDER_RATE_WINDOW_MS ?? '60000', 10);
+const rateLimit = Number.parseInt(process.env.AINDER_RATE_LIMIT ?? (isProduction ? '120' : '1000'), 10);
+const maxBodyBytes = Number.parseInt(process.env.AINDER_MAX_BODY_BYTES ?? '1048576', 10);
+const buckets = new Map<string, { count: number; resetAt: number }>();
 
-type RateBucket = { count: number; resetAt: number };
+function parseCsv(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
 function parsePort(): number {
   const argIdx = process.argv.indexOf('--port');
@@ -42,20 +48,56 @@ function parsePort(): number {
   return 6782;
 }
 
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-const ADMIN_ENABLED =
-  !IS_PRODUCTION && process.env.AINDER_ENABLE_ADMIN_ENDPOINTS === 'true';
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = Number(process.env.AINDER_RATE_LIMIT_PER_MINUTE ?? 120);
-const buckets = new Map<string, { count: number; resetAt: number }>();
+function validateEnvironment(): void {
+  const failures: string[] = [];
+  if (isProduction) {
+    if (!storePath) failures.push('AINDER_STORE_PATH is required in production.');
+    if (allowedOrigins.length === 0) failures.push('AINDER_ALLOWED_ORIGINS is required in production.');
+    if (!adminToken) failures.push('AINDER_ADMIN_TOKEN is required in production if admin routes are compiled in.');
+  }
+  if (failures.length > 0) {
+    for (const failure of failures) console.error(`[mcp-ainder] ${failure}`);
+    process.exit(1);
+  }
+}
 
-function allowedOrigins(): Set<string> {
-  return new Set(
-    (process.env.AINDER_ALLOWED_ORIGINS ?? '')
-      .split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  );
+async function main(): Promise<void> {
+  validateEnvironment();
+  const port = parsePort();
+  const store = createAinderStore({ persistPath: storePath, seedDemo });
+  store.persist();
+
+  const server = createServer((req, res) => {
+    const requestId = requestIdFor(req);
+    setSecurityHeaders(res, requestId);
+    if (!applyCors(req, res)) return;
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (!consumeRateLimit(req, res)) return;
+
+    void handleRequest(req, res, store, requestId).catch((err) => {
+      console.error('[mcp-ainder] request handler error:', { requestId, err });
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error', request_id: requestId }));
+      }
+    });
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(port, () => {
+      console.log(`[mcp-ainder] ready: http://localhost:${port}/mcp (${isProduction ? 'production' : 'development'})`);
+      resolve();
+    });
+  });
+}
+
+function requestIdFor(req: IncomingMessage): string {
+  const incoming = req.headers['x-request-id'];
+  return typeof incoming === 'string' && incoming.length > 0 ? incoming : randomUUID();
 }
 
 function setSecurityHeaders(res: ServerResponse, requestId: string): void {
@@ -63,97 +105,74 @@ function setSecurityHeaders(res: ServerResponse, requestId: string): void {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
 }
 
-function rejectUnapprovedOrigin(req: IncomingMessage, res: ServerResponse): boolean {
+function applyCors(req: IncomingMessage, res: ServerResponse): boolean {
   const origin = req.headers.origin;
-  if (!IS_PRODUCTION || origin === undefined) return false;
-  const allowed = allowedOrigins();
-  if (allowed.has(origin)) return false;
-  res.writeHead(403, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'origin not allowed' }));
-  return true;
-}
-
-function rateLimit(req: IncomingMessage, res: ServerResponse, requestId: string): boolean {
-  const nowMs = Date.now();
-  const key = `${req.socket.remoteAddress ?? 'unknown'}:${req.url ?? '/'}`;
-  const bucket = buckets.get(key);
-  if (!bucket || bucket.resetAt <= nowMs) {
-    buckets.set(key, { count: 1, resetAt: nowMs + RATE_LIMIT_WINDOW_MS });
+  if (typeof origin !== 'string') return true;
+  const allowed = allowedOrigins.includes(origin) || (!isProduction && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin));
+  if (!allowed) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'origin not allowed' }));
     return false;
   }
-  bucket.count += 1;
-  if (bucket.count <= RATE_LIMIT_MAX) return false;
-  res.writeHead(429, {
-    'Content-Type': 'application/json',
-    'Retry-After': String(Math.ceil((bucket.resetAt - nowMs) / 1000)),
-  });
-  res.end(JSON.stringify({ error: 'rate limited', request_id: requestId }));
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Request-Id');
   return true;
 }
 
-async function main(): Promise<void> {
-  const port = parsePort();
-  const store = createAinderStore({
-    seedDemo: process.env.AINDER_ENABLE_DEMO_BOOTSTRAP === 'true' || !IS_PRODUCTION,
-    persistencePath: process.env.AINDER_STATE_FILE,
-    requirePersistence: IS_PRODUCTION,
-  });
+function consumeRateLimit(req: IncomingMessage, res: ServerResponse): boolean {
+  const key = `${req.socket.remoteAddress ?? 'unknown'}:${new URL(req.url ?? '/', 'http://localhost').pathname}`;
+  const now = Date.now();
+  const current = buckets.get(key);
+  const bucket = current && current.resetAt > now ? current : { count: 0, resetAt: now + rateWindowMs };
+  bucket.count += 1;
+  buckets.set(key, bucket);
+  res.setHeader('RateLimit-Limit', String(rateLimit));
+  res.setHeader('RateLimit-Remaining', String(Math.max(0, rateLimit - bucket.count)));
+  res.setHeader('RateLimit-Reset', String(Math.ceil(bucket.resetAt / 1000)));
+  if (bucket.count > rateLimit) {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'rate limit exceeded' }));
+    return false;
+  }
+  return true;
+}
 
-  const server = createServer((req, res) => {
-    const requestId = randomUUID();
-    setSecurityHeaders(res, requestId);
-    void handleRequest(req, res, store, config, buckets, requestId).catch((err) => {
-      console.error('[mcp-ainder] request handler error:', { request_id: requestId, err });
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'internal_error', request_id: requestId }));
-      }
-    });
-  });
-
-  await new Promise<void>((resolve) => {
-    server.listen(config.port, () => {
-      console.log(`[mcp-ainder] ready: http://localhost:${config.port}/mcp (${config.nodeEnv})`);
-      resolve();
-    });
-  });
+function requireAdmin(req: IncomingMessage, res: ServerResponse): boolean {
+  if (!isProduction) return true;
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
+  if (token && adminToken && token === adminToken) return true;
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('not found');
+  return false;
 }
 
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  store: ReturnType<typeof createAinderStore>,
-  config: RuntimeConfig,
-  buckets: Map<string, RateBucket>,
+  store: Store,
   requestId: string,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://localhost`);
-  const requestId = randomUUID();
-  setSecurityHeaders(res, requestId);
-  if (rejectUnapprovedOrigin(req, res) || rateLimit(req, res, requestId)) {
+
+  if (req.method === 'GET' && url.pathname === '/admin/state') {
+    if (!requireAdmin(req, res)) return;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ request_id: requestId, state: store.state() }));
     return;
   }
 
-  if (url.pathname.startsWith('/admin/')) {
-    if (!ADMIN_ENABLED) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('not found');
-      return;
-    }
-    if (req.method === 'GET' && url.pathname === '/admin/state') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(store.state()));
-      return;
-    }
-    if (req.method === 'POST' && url.pathname === '/admin/reset') {
-      store.reset();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ cleared: true }));
-      return;
-    }
+  if (req.method === 'POST' && url.pathname === '/admin/reset') {
+    if (!requireAdmin(req, res)) return;
+    store.reset();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ request_id: requestId, cleared: true }));
+    return;
   }
 
   if (req.method === 'POST' && url.pathname === '/mcp') {
@@ -163,7 +182,7 @@ async function handleRequest(
       parsed = JSON.parse(body);
     } catch {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'invalid_json', request_id: requestId }));
+      res.end(JSON.stringify({ error: 'invalid JSON body', request_id: requestId }));
       return;
     }
 
@@ -189,7 +208,7 @@ async function handleRequest(
       await transport.handleRequest(req, res, parsed);
       store.persist();
     } catch (err) {
-      console.error('[mcp-ainder] mcp handle failed:', { request_id: requestId, err });
+      console.error('[mcp-ainder] mcp handle failed:', { requestId, err });
       if (!res.headersSent) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(
@@ -197,6 +216,7 @@ async function handleRequest(
             jsonrpc: '2.0',
             error: { code: -32603, message: 'Internal server error', data: { request_id: requestId } },
             id: null,
+            request_id: requestId,
           }),
         );
       }
@@ -213,9 +233,9 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
     const chunks: Buffer[] = [];
     let total = 0;
     req.on('data', (chunk: Buffer) => {
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        reject(new Error(`request body exceeds ${maxBytes} bytes`));
+      total += chunk.length;
+      if (total > maxBodyBytes) {
+        reject(new Error('request body too large'));
         req.destroy();
         return;
       }

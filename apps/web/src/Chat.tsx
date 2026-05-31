@@ -57,11 +57,9 @@ interface ChatProps {
   readonly sandboxUrl: string;
 }
 
-// Dev-only localStorage key for the guest-token flow. Production uses the
-// server-side session cookie transport; the browser must not mint or persist
-// bearer credentials outside local development.
-const DEV_GUEST_AUTH_ENABLED = import.meta.env.DEV;
-const LS_GUEST_TOKEN = 'ggui-basic-web/guestToken';
+// The chat id is URL-resident so cross-tab links land on the same conversation.
+// Auth is intentionally cookie/session based; the browser never mints or stores
+// guest bearer tokens in production.
 const URL_CHAT_PARAM = 'chat';
 
 type AuthState = 'checking' | 'authenticated' | 'unauthenticated';
@@ -126,84 +124,24 @@ function getInitialChatId(): string | undefined {
 }
 
 /**
- * Mint a fresh guest token from the dev backend. This path is intentionally
- * unavailable in production builds so guest bearer auth cannot become a
- * production fallback.
- */
-async function mintGuestToken(agentEndpoint: string): Promise<string> {
-  if (!DEV_GUEST_AUTH_ENABLED) {
-    throw new Error('guest bearer auth is disabled outside development.');
-  }
-  const res = await fetch(`${agentEndpoint}/auth/guest`, { method: 'POST' });
-  if (!res.ok) {
-    throw new Error(`POST /auth/guest returned ${res.status}`);
-  }
-  const body = (await res.json()) as { guestToken?: unknown };
-  if (typeof body.guestToken !== 'string' || body.guestToken.length === 0) {
-    throw new Error('POST /auth/guest response missing guestToken');
-  }
-  return body.guestToken;
-}
-
-/**
  * Chat panel + iframe area for an MCP-Apps-spec agent backend.
  *
- * Auth: production relies on secure, server-side session cookies. The legacy
- * guest bearer token bootstrap remains dev-only for local harnesses.
+ * Auth: secure cookie + server-side session. The browser shell does not
+ * bootstrap guest identity or persist bearer credentials; session creation,
+ * revocation, and audit live on the backend.
  */
 export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
-  const guestTokenRef = useRef<string | null>(null);
-  const [guestTokenReady, setGuestTokenReady] = useState(!DEV_GUEST_AUTH_ENABLED);
-
-  // Dev boot: pull cached token from localStorage; mint a fresh one if absent.
-  // Production skips this path entirely and lets cookie/session auth fail closed.
-  useEffect(() => {
-    if (!DEV_GUEST_AUTH_ENABLED) return;
-    let cancelled = false;
-    void (async () => {
-      setAuthState('checking');
-      setLoginError(null);
-      try {
-        const res = await fetch(`${agentEndpoint}/auth/session`, {
-          method: 'GET',
-          credentials: 'include',
-          headers: { Accept: 'application/json' },
-        });
-        if (!cancelled) setSessionState(res.ok ? 'ready' : 'unauthenticated');
-      } catch (err) {
-        console.warn('[Chat] guest-token mint failed', err);
-        if (!cancelled) setGuestTokenReady(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [agentEndpoint]);
 
   const [chatId, setChatId] = useState<string | undefined>(() =>
     getInitialChatId(),
   );
 
-  const getAuthToken = useCallback(
-    () =>
-      DEV_GUEST_AUTH_ENABLED ? (guestTokenRef.current ?? undefined) : undefined,
-    [],
-  );
+  const getAuthToken = useCallback(() => undefined, []);
 
-  // 401 handler: development refreshes the guest token once. Production does
-  // not create fallback credentials; session failures remain 401s.
-  const onUnauthenticated = useCallback(async (): Promise<boolean> => {
-    if (!DEV_GUEST_AUTH_ENABLED) return false;
-    try {
-      const fresh = await mintGuestToken(agentEndpoint);
-      guestTokenRef.current = fresh;
-      window.localStorage.setItem(LS_GUEST_TOKEN, fresh);
-      return true;
-    } catch (err) {
-      console.warn('[Chat] guest-token refresh failed', err);
-      return false;
-    }
-  }, [agentEndpoint]);
+  // Cookie sessions cannot be refreshed by minting a guest bearer token.
+  // A 401 must surface to the user/backend rather than silently creating a
+  // new principal and bypassing audit/revocation semantics.
+  const onUnauthenticated = useCallback(async (): Promise<boolean> => false, []);
 
   // Stamp the server-allocated chatId into URL + state once
   // received. Quiet when the URL already carries the right id (this
@@ -275,65 +213,6 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
       (e.currentTarget.form as HTMLFormElement).requestSubmit();
     }
   };
-
-  if (sessionState === 'checking') {
-    return (
-      <div style={{ padding: 24, color: '#888', fontFamily: 'system-ui' }}>
-        Checking secure session…
-      </div>
-    );
-  }
-
-  if (sessionState === 'unauthenticated') {
-    return (
-      <div style={{ padding: 24, color: '#c00', fontFamily: 'system-ui' }}>
-        Sign in is required before opening AInder chat. Guest browser auth is
-        disabled outside explicit local development.
-      </div>
-    );
-  }
-
-  if (authState === 'unauthenticated') {
-    return (
-      <form
-        onSubmit={onLoginSubmit}
-        style={{
-          maxWidth: 360,
-          margin: '80px auto',
-          display: 'grid',
-          gap: 12,
-          fontFamily: 'system-ui',
-        }}
-      >
-        <h1 style={{ margin: 0, fontSize: 24 }}>Sign in to AInder</h1>
-        <p style={{ margin: 0, color: '#666', fontSize: 14 }}>
-          Production chat access requires a secure server-side session.
-        </p>
-        <input
-          autoFocus
-          name="userId"
-          placeholder="User ID"
-          value={loginUserId}
-          onChange={(e) => setLoginUserId(e.target.value)}
-          style={{ padding: 10 }}
-        />
-        <input
-          name="password"
-          placeholder="Password"
-          type="password"
-          value={loginPassword}
-          onChange={(e) => setLoginPassword(e.target.value)}
-          style={{ padding: 10 }}
-        />
-        {loginError !== null ? (
-          <p style={{ color: '#c00', margin: 0 }}>{loginError}</p>
-        ) : null}
-        <button type="submit" disabled={!loginUserId.trim() || !loginPassword}>
-          Sign in
-        </button>
-      </form>
-    );
-  }
 
   return (
     <div className={`layout layout-${layout}`}>
@@ -653,6 +532,7 @@ function ResourceFrame({
         if (token) headers.Authorization = `Bearer ${token}`;
         const resp = await fetch(`${agentEndpoint}/agent`, {
           method: 'POST',
+          credentials: 'include',
           headers,
           credentials: 'include',
           body: JSON.stringify({

@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const GRAPHQL_URL = 'https://backboard.railway.com/graphql/v2';
-const LLM_KEY_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY'];
+const LLM_KEY_VARS = ['OPENAI_API_KEY'];
 
 const argv = process.argv.slice(2);
 const DRY = argv.includes('--dry-run');
@@ -63,7 +63,12 @@ if (!RAILWAY_API_TOKEN) {
 }
 const llmKeys = LLM_KEY_VARS.filter((k) => process.env[k]);
 if (llmKeys.length === 0 && !DRY) {
-  die('No LLM API key found (one of ' + LLM_KEY_VARS.join(', ') + '). Add it to .env.local.');
+  die('OPENAI_API_KEY is required. Add it to .env.local.');
+}
+if (!DRY) {
+  const required = ['AINDER_SESSION_SECRET', 'AINDER_ADMIN_TOKEN', 'COCOUN_API_KEY', 'TOBL_API_KEY'];
+  const missing = required.filter((name) => !process.env[name]);
+  if (missing.length > 0) die(`Missing production deploy env: ${missing.join(', ')}`);
 }
 
 // --- railway CLI invocation (prefer a global `railway`, else pnpm dlx) ------
@@ -154,6 +159,11 @@ function serviceVars(svc, services) {
     vars.GGUI_PUBLIC_BASE_URL = `https://${publicRef(svc)}`;
   }
   if (svc.role === 'agent') {
+    vars.NODE_ENV = 'production';
+    vars.AINDER_SESSION_SECRET = process.env.AINDER_SESSION_SECRET;
+    vars.AINDER_ALLOWED_ORIGINS = process.env.AINDER_ALLOWED_ORIGINS ?? `https://${publicRef(services.find((s) => s.role === 'web') ?? svc)}`;
+    vars.VITE_AGENT_ENDPOINT_URL = `https://${publicRef(svc)}`;
+    if (process.env.OPENAI_MODEL) vars.OPENAI_MODEL = process.env.OPENAI_MODEL;
     if (process.env.MODEL) vars.MODEL = process.env.MODEL;
     const ggui = services.find((s) => s.role === 'ggui');
     if (ggui) vars.GGUI_MCP_URL = `http://${privateRef(ggui)}:${ggui.port}/mcp`;
@@ -175,12 +185,21 @@ function serviceVars(svc, services) {
     vars.AINDER_ENABLE_DEMO_BOOTSTRAP = 'false';
     vars.AINDER_ALLOWED_ORIGINS = [web, agent].filter(Boolean).map((s) => `https://${publicRef(s)}`).join(',');
   }
+  if (svc.role === 'mcp') {
+    vars.NODE_ENV = 'production';
+    vars.AINDER_SEED_DEMO = 'false';
+    vars.AINDER_STORE_PATH = process.env.AINDER_STORE_PATH ?? '/data/ainder-store.json';
+    vars.AINDER_ADMIN_TOKEN = process.env.AINDER_ADMIN_TOKEN;
+    vars.AINDER_ALLOWED_ORIGINS = process.env.AINDER_ALLOWED_ORIGINS ?? services.filter((s) => s.public).map((s) => `https://${publicRef(s)}`).join(',');
+    vars.COCOUN_API_KEY = process.env.COCOUN_API_KEY;
+    vars.TOBL_API_KEY = process.env.TOBL_API_KEY;
+  }
   if (svc.role === 'web') {
     const agent = services.find((s) => s.role === 'agent');
     if (agent) vars.VITE_AGENT_ENDPOINT_URL = `https://${publicRef(agent)}`;
     vars.AINDER_ALLOWED_ORIGINS = `https://${publicRef(svc)}`;
   }
-  return vars;
+  return Object.fromEntries(Object.entries(vars).filter(([, value]) => value !== undefined));
 }
 
 // --- GraphQL: set build + start command (the CLI can't) --------------------

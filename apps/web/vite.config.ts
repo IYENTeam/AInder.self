@@ -33,32 +33,26 @@ export default defineConfig(({ command, mode }) => {
   const serverPort = Number(env.VITE_SERVER_PORT ?? env.PORT ?? 6890);
   const agentEndpoint = env.VITE_AGENT_ENDPOINT_URL?.trim();
 
-  if (command === 'build' && mode === 'production') {
-    if (!agentEndpoint) {
-      throw new Error('VITE_AGENT_ENDPOINT_URL is required for production builds.');
-    }
-    const parsed = new URL(agentEndpoint);
-    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
-      throw new Error('VITE_AGENT_ENDPOINT_URL must not point at localhost in production.');
-    }
-  }
+if (process.env.NODE_ENV === 'production' && !process.env.VITE_AGENT_ENDPOINT_URL) {
+  throw new Error('VITE_AGENT_ENDPOINT_URL is required for production web builds.');
+}
 
-  return {
-    plugins: [react()],
-    server: {
-      port: serverPort,
-      strictPort: true,
-      host: '127.0.0.1',
-    },
-    preview: {
-      port: serverPort,
-      strictPort: true,
-      host: true,
-      allowedHosts: true,
-    },
-    build: {
-      target: 'es2023',
-      sourcemap: true,
-    },
-  };
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: SERVER_PORT,
+    strictPort: true,
+    host: '127.0.0.1',
+  },
+  preview: {
+    port: SERVER_PORT,
+    strictPort: true,
+    host: true,
+    allowedHosts: true,
+  },
+  build: {
+    target: 'es2023',
+    sourcemap: true,
+  },
 });

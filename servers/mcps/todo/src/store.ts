@@ -1,9 +1,21 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+
 export type Visibility = 'public' | 'private' | 'hidden';
 export type PersonaConversationMode = 'direct' | 'simulation';
 export type ProviderStatus = 'notStarted' | 'providerSuccess' | 'providerFailure' | 'cachedDemo' | 'seededFallback';
+export type AuditEventType =
+  | 'auth.login'
+  | 'auth.logout'
+  | 'upload.created'
+  | 'upload.sanitized'
+  | 'upload.deleted'
+  | 'provider.egress_blocked'
+  | 'provider.call'
+  | 'match.requested'
+  | 'report.reveal_consent'
+  | 'tool.invoked';
 
 export interface User {
   id: string;
@@ -210,6 +222,23 @@ export interface AuditEvent {
   createdAt: string;
 }
 
+export interface SessionRecord {
+  id: string;
+  userId: string;
+  createdAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+}
+
+export interface AuditEvent {
+  id: string;
+  requestId: string | null;
+  type: AuditEventType;
+  userId: string | null;
+  subjectId: string | null;
+  createdAt: string;
+}
+
 export interface AinderState {
   currentUserId: string;
   builderOpenAiKeyConfigured: boolean;
@@ -228,6 +257,7 @@ export interface AinderState {
   councilRuns: CocounCouncilRun[];
   reports: MatchReport[];
   consents: ConsentRecord[];
+  sessions: SessionRecord[];
   auditEvents: AuditEvent[];
 }
 
@@ -276,6 +306,13 @@ export interface AinderStore {
   requestReportReveal(reportId: string): MatchReport;
   consentReportReveal(reportId: string, consent: boolean): MatchReport;
   getMatchReport(reportId: string): MatchReport | null;
+  persist(): void;
+  audit(type: AuditEventType, subjectId?: string | null, userId?: string | null): AuditEvent;
+}
+
+export interface CreateAinderStoreOptions {
+  readonly persistPath?: string;
+  readonly seedDemo?: boolean;
 }
 
 export interface AinderStoreOptions {
@@ -291,29 +328,22 @@ function now(): string {
 }
 
 function hashPassword(password: string): string {
-  const salt = randomBytes(16);
-  const derived = scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
-  return `scrypt:v1:${salt.toString('base64url')}:${derived.toString('base64url')}`;
+  const salt = randomBytes(16).toString('base64url');
+  const derived = scryptSync(password, salt, 64).toString('base64url');
+  return `scrypt:v1:${salt}:${derived}`;
 }
 
-function verifyPassword(password: string, encoded: string): boolean {
-  const [, version, salt, digest] = encoded.split(':');
-  if (!encoded.startsWith('scrypt:') || version !== 'v1' || !salt || !digest) {
-    return false;
-  }
-  const expected = Buffer.from(digest, 'base64url');
-  const actual = scryptSync(password, Buffer.from(salt, 'base64url'), expected.length, {
-    N: 16384,
-    r: 8,
-    p: 1,
-  });
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+function verifyPassword(password: string, passwordHash: string): boolean {
+  const [scheme, version, salt, expected] = passwordHash.split(':');
+  if (scheme !== 'scrypt' || version !== 'v1' || !salt || !expected) return false;
+  const actual = scryptSync(password, salt, 64);
+  const expectedBytes = Buffer.from(expected, 'base64url');
+  return actual.length === expectedBytes.length && timingSafeEqual(actual, expectedBytes);
 }
 
 function nextId(prefix: string, counters: Map<string, number>): string {
-  const next = (counters.get(prefix) ?? 0) + 1;
-  counters.set(prefix, next);
-  return `${prefix}-${next}`;
+  counters.set(prefix, (counters.get(prefix) ?? 0) + 1);
+  return `${prefix}-${randomUUID()}`;
 }
 
 function redact(text: string): { sanitizedText: string; summary: Array<{ category: string; count: number }> } {
@@ -360,11 +390,13 @@ function assertExternalCallAllowed(
     (u) => u.userId === userId && u.rawDeletionStatus === 'pending',
   );
   if (pending) {
-    createAuditEvent(state, counters, {
+    state.auditEvents.push({
+      id: `audit-${randomUUID()}`,
       requestId: null,
-      actorUserId: userId,
-      eventType: 'provider.egress_blocked',
-      subjectId: userId,
+      type: 'provider.egress_blocked',
+      userId,
+      subjectId: null,
+      createdAt: now(),
     });
     throw new Error('External calls are blocked until raw deletion or retention decision is complete.');
   }
@@ -461,16 +493,8 @@ function createSeedState(): AinderState {
     councilRuns: [],
     reports: [],
     consents: [],
-    auditEvents: [
-      {
-        id: 'audit-seed-1',
-        action: 'demo.seed_bootstrap',
-        actorUserId: null,
-        subjectId: null,
-        requestId: null,
-        createdAt,
-      },
-    ],
+    sessions: [],
+    auditEvents: [],
   };
 }
 
@@ -493,52 +517,41 @@ function createEmptyState(): AinderState {
     councilRuns: [],
     reports: [],
     consents: [],
+    sessions: [],
     auditEvents: [],
   };
 }
 
-function loadState(path: string): AinderState {
-  const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<AinderState>;
-  return { ...createEmptyState(), ...raw, auditEvents: raw.auditEvents ?? [] };
+function loadState(path: string): AinderState | null {
+  if (!existsSync(path)) return null;
+  return JSON.parse(readFileSync(path, 'utf8')) as AinderState;
 }
 
-function persistState(path: string, state: AinderState): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
-}
-
-function primeCounters(state: AinderState, counters: Map<string, number>): void {
-  const visit = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item);
-      return;
-    }
-    if (value === null || typeof value !== 'object') return;
-    const id = (value as { id?: unknown }).id;
-    if (typeof id === 'string') {
-      const match = /^(.+)-(\d+)$/.exec(id);
-      if (match) {
-        counters.set(match[1]!, Math.max(counters.get(match[1]!) ?? 0, Number(match[2])));
-      }
-    }
-    for (const child of Object.values(value)) visit(child);
-  };
-  visit(state);
-}
-
-export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
-  const persistencePath = opts.persistencePath ?? null;
-  if (opts.requirePersistence === true && !persistencePath) {
-    throw new Error('AINDER_STATE_FILE is required when durable state is required.');
-  }
-  const hasPersistedState = persistencePath !== null && existsSync(persistencePath);
-  let state = hasPersistedState
-    ? loadState(persistencePath!)
-    : opts.seedDemo === true
-      ? createSeedState()
-      : createEmptyState();
+export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderStore {
+  let state = opts.persistPath !== undefined ? loadState(opts.persistPath) ?? (opts.seedDemo ? createSeedState() : createEmptyState()) : opts.seedDemo === false ? createEmptyState() : createSeedState();
+  state.sessions ??= [];
+  state.auditEvents ??= [];
   const counters = new Map<string, number>();
   primeCounters(state, counters);
+
+  const persist = (): void => {
+    if (opts.persistPath === undefined) return;
+    mkdirSync(dirname(opts.persistPath), { recursive: true });
+    writeFileSync(opts.persistPath, `${JSON.stringify(state, null, 2)}\n`);
+  };
+
+  const audit = (type: AuditEventType, subjectId: string | null = null, userId: string | null = state.currentUserId || null): AuditEvent => {
+    const event: AuditEvent = {
+      id: nextId('audit', counters),
+      requestId: null,
+      type,
+      userId,
+      subjectId,
+      createdAt: now(),
+    };
+    state.auditEvents.push(event);
+    return event;
+  };
 
   const currentUser = (): User => {
     const user = state.users.find((u) => u.id === state.currentUserId);
@@ -554,13 +567,20 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
     return report;
   };
 
-  const api: AinderStore = {
-    state: () => state,
-    persist,
+  const redactedState = (): AinderState => ({
+    ...state,
+    users: state.users.map((user) => ({ ...user, passwordHash: '[redacted]' })),
+    uploads: state.uploads.map((upload) => ({ ...upload, rawText: null })),
+  });
+
+  return {
+    state: redactedState,
     reset() {
-      state = opts.seedDemo === true ? createSeedState() : createEmptyState();
+      state = opts.seedDemo ? createSeedState() : createEmptyState();
+      state.sessions ??= [];
+      state.auditEvents ??= [];
       counters.clear();
-      primeCounters(state, counters);
+      persist();
     },
     createUser(userId, password) {
       if (state.users.some((u) => u.userId === userId)) throw new Error('User already exists.');
@@ -574,17 +594,31 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       };
       state.users.push(user);
       state.currentUserId = user.id;
-      createAuditEvent(state, counters, {
-        requestId: null,
-        actorUserId: user.id,
-        eventType: 'auth.signup',
-        subjectId: user.id,
+      state.sessions.push({
+        id: nextId('session', counters),
+        userId: user.id,
+        createdAt: now(),
+        expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString(),
+        revokedAt: null,
       });
+      audit('auth.login', user.id, user.id);
+      persist();
       return user;
     },
     login(userId, password) {
       const user = state.users.find((u) => u.userId === userId && verifyPassword(password, u.passwordHash));
-      if (user) state.currentUserId = user.id;
+      if (user) {
+        state.currentUserId = user.id;
+        state.sessions.push({
+          id: nextId('session', counters),
+          userId: user.id,
+          createdAt: now(),
+          expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString(),
+          revokedAt: null,
+        });
+        audit('auth.login', user.id, user.id);
+        persist();
+      }
       return user ?? null;
     },
     currentUser,
@@ -640,12 +674,8 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
         createdAt: now(),
       };
       state.uploads.push(upload);
-      createAuditEvent(state, counters, {
-        requestId: null,
-        actorUserId: state.currentUserId || null,
-        eventType: 'upload.created',
-        subjectId: upload.id,
-      });
+      audit('upload.created', upload.id, upload.userId);
+      persist();
       return upload;
     },
     sanitizeConversation(uploadId) {
@@ -688,6 +718,8 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
           subjectId: upload.id,
         });
       }
+      audit('upload.sanitized', sanitized.id, sanitized.userId);
+      persist();
       return sanitized;
     },
     deleteRawUpload(uploadId) {
@@ -695,12 +727,8 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       if (!upload) throw new Error('Upload not found.');
       upload.rawText = null;
       upload.rawDeletionStatus = 'deleted';
-      createAuditEvent(state, counters, {
-        requestId: null,
-        actorUserId: upload.userId,
-        eventType: 'upload.raw_deleted',
-        subjectId: upload.id,
-      });
+      audit('upload.deleted', upload.id, upload.userId);
+      persist();
       return { deleted: true, rawDeletionStatus: upload.rawDeletionStatus };
     },
     confirmSanitizedConversation(sanitizedConversationId) {
@@ -997,6 +1025,7 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       };
       conversation.status = 'matchRequested';
       state.matchRequests.push(request);
+      audit('match.requested', request.id, request.requesterId);
       state.consents.push({
         id: nextId('consent', counters),
         userId: conversation.requesterId,
@@ -1132,7 +1161,7 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
         visiblePayloadSummary: 'Match report reveal consent',
         createdAt: now(),
       });
-      audit('reportReveal', consent ? 'success' : 'blocked', report.id);
+      audit('report.reveal_consent', report.id, state.currentUserId);
       const conversation = state.conversations.find((c) => c.id === report.conversationId);
       const other = conversation?.targetUserId;
       if (consent && other) report.revealConsents[other] = report.revealConsents[other] ?? false;
@@ -1140,8 +1169,22 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       return report;
     },
     getMatchReport(reportId) {
-      return state.reports.find((r) => r.id === reportId) ?? null;
+      const report = state.reports.find((r) => r.id === reportId) ?? null;
+      if (report === null || report.status === 'revealed') return report;
+      return {
+        ...report,
+        sections: {
+          summary: 'Locked until both users consent to reveal.',
+          fitPoints: [],
+          watchouts: [],
+          firstTopics: [],
+          advice: [],
+          councilNote: 'Locked',
+        },
+      };
     },
+    persist,
+    audit,
   };
 
   const writeMethods = new Set<keyof AinderStore>([
