@@ -12,7 +12,7 @@
  * `@ggui-ai/protocol/integrations/mcp-apps`. The library handles
  * every `_meta.ui.*` / `_meta.ai.ggui/*` slice.
  */
-import { Agent, MCPServerStreamableHttp, run } from '@openai/agents';
+import { Agent, MCPServerStreamableHttp, OpenAIProvider, Runner } from '@openai/agents';
 import { GGUI_AGENT_SYSTEM_PROMPT } from '@ggui-ai/protocol';
 import type {
   AgentAdapter,
@@ -29,6 +29,8 @@ export interface OpenAiAgentAdapterOptions {
   readonly model?: string;
   /** Default `process.env.OPENAI_API_KEY`. */
   readonly apiKey?: string;
+  /** Optional OpenAI-compatible API base URL. */
+  readonly baseURL?: string;
 }
 
 /**
@@ -44,19 +46,29 @@ export function createOpenAiAgentAdapter(
   opts: OpenAiAgentAdapterOptions = {},
 ): AgentAdapter {
   const apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY;
+  const baseURL = opts.baseURL ?? process.env.OPENAI_BASE_URL;
   if (!apiKey) {
     throw new Error(
       'createOpenAiAgentAdapter: OPENAI_API_KEY required (env var or apiKey option).',
     );
   }
-  // The SDK reads OPENAI_API_KEY from the env at request time.
+  // The SDK reads OPENAI_API_KEY / OPENAI_BASE_URL from the env at request time.
   if (!process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = apiKey;
+  if (baseURL && !process.env.OPENAI_BASE_URL) process.env.OPENAI_BASE_URL = baseURL;
   const model = opts.model ?? 'gpt-5.5';
+
+  const modelProvider = new OpenAIProvider({
+    apiKey,
+    ...(baseURL ? { baseURL } : {}),
+    // ClosedRouter / router.iyendev.com is Chat Completions compatible.
+    useResponses: false,
+  });
+  const runner = new Runner({ modelProvider, tracingDisabled: true });
 
   return {
     name: 'openai-agents-sdk',
     run(input: AgentInput): AsyncIterable<NormalizedMessage> {
-      return runOnce({ input, model });
+      return runOnce({ input, model, runner });
     },
   };
 }
@@ -64,8 +76,9 @@ export function createOpenAiAgentAdapter(
 async function* runOnce(args: {
   readonly input: AgentInput;
   readonly model: string;
+  readonly runner: Runner;
 }): AsyncIterable<NormalizedMessage> {
-  const { input, model } = args;
+  const { input, model, runner } = args;
 
   // Translate the library's brand-agnostic mcpServers map into the
   // SDK's native `MCPServerStreamableHttp[]` shape. Map keys
@@ -125,7 +138,7 @@ async function* runOnce(args: {
     // disconnect / page reload. Instead we honor abort cooperatively: break
     // the loop (below) and let the for-await's `iterator.return()` tear the
     // stream down cleanly from the lock-holder side.
-    const stream = await run(agent, input.prompt, {
+    const stream = await runner.run(agent, input.prompt, {
       stream: true,
       ...(previousResponseId ? { previousResponseId } : {}),
     });
@@ -167,6 +180,23 @@ async function* runOnce(args: {
         typeof inner.delta === 'string'
       ) {
         textBuf += inner.delta;
+        continue;
+      }
+
+      if (
+        inner?.type === 'response.output_item.done' &&
+        typeof (inner.item as { content?: unknown } | undefined)?.content === 'object'
+      ) {
+        const text = extractTextFromContent(
+          (inner.item as { content?: unknown }).content,
+        );
+        if (text) textBuf += text;
+        continue;
+      }
+
+      if (ev.type === 'run_item_stream_event' && ev.name === 'message_output_created') {
+        const text = extractTextFromRunItem(ev.item);
+        if (text) textBuf += text;
         continue;
       }
 
@@ -318,4 +348,26 @@ function stringifyToolOutput(output: unknown, depth: number = 0): string {
   } catch {
     return String(output);
   }
+}
+
+
+function extractTextFromRunItem(item: unknown): string {
+  if (typeof item !== 'object' || item === null) return '';
+  const rawItem = (item as { rawItem?: unknown }).rawItem;
+  if (typeof rawItem !== 'object' || rawItem === null) return '';
+  return extractTextFromContent((rawItem as { content?: unknown }).content);
+}
+
+function extractTextFromContent(content: unknown): string {
+  if (!Array.isArray(content)) return '';
+  const out: string[] = [];
+  for (const part of content as Array<{ type?: unknown; text?: unknown }>) {
+    if (
+      (part.type === 'output_text' || part.type === 'text') &&
+      typeof part.text === 'string'
+    ) {
+      out.push(part.text);
+    }
+  }
+  return out.join('');
 }

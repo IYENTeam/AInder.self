@@ -55,7 +55,10 @@ export async function startServer(opts: ServerOptions): Promise<AgentServerHandl
   return startAgentServer({
     port: opts.port,
     mcpServers: opts.mcpServers,
-    adapter: createOpenAiAgentAdapter(opts.model !== undefined ? { model: opts.model } : {}),
+    adapter: createOpenAiAgentAdapter({
+      ...(opts.model !== undefined ? { model: opts.model } : {}),
+      ...(process.env.OPENAI_BASE_URL ? { baseURL: process.env.OPENAI_BASE_URL } : {}),
+    }),
     ...(opts.auth !== undefined ? { auth: opts.auth } : {}),
     ...(opts.sandboxProxyPort !== undefined ? { sandboxProxyPort: opts.sandboxProxyPort } : {}),
     ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),

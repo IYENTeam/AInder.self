@@ -1,0 +1,13 @@
+name = "ainder-self"
+main = "workers-entry.js"
+compatibility_date = "2026-05-31"
+account_id = "8277c1acc712e4a9d00479255015c200"
+workers_dev = true
+routes = [
+  { pattern = "ainder.iyen.io", custom_domain = true }
+]
+
+[assets]
+directory = "./apps/web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
