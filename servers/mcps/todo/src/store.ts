@@ -39,6 +39,11 @@ export interface ConversationUpload {
   rawDeletionStatus: 'pending' | 'deleted' | 'retained';
   createdAt: string;
 }
+export interface KakaoExportMetadata {
+  readonly lineCount: number;
+  readonly messageCount: number;
+  readonly participantCount: number;
+}
 
 export interface SanitizedConversation {
   id: string;
@@ -46,6 +51,7 @@ export interface SanitizedConversation {
   userId: string;
   sanitizedText: string;
   redactionSummary: Array<{ category: string; count: number }>;
+  metadata: KakaoExportMetadata;
   confirmedAt: string | null;
 }
 
@@ -341,7 +347,10 @@ function redact(text: string): { sanitizedText: string; summary: Array<{ categor
   return { sanitizedText, summary };
 }
 
-function validateKakaoExport(text: string): void {
+function parseKakaoExport(text: string): {
+  metadata: KakaoExportMetadata;
+  normalizedText: string;
+} {
   const normalized = text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -352,11 +361,29 @@ function validateKakaoExport(text: string): void {
   }
 
   const messagePattern =
-    /^\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.\s*(오전|오후)\s*\d{1,2}:\d{2},\s*[^:]{1,40}\s*:\s*.+$/;
-  const matching = normalized.filter((line) => messagePattern.test(line));
-  if (matching.length < 2) {
+    /^\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.\s*(오전|오후)\s*\d{1,2}:\d{2},\s*([^:]{1,40})\s*:\s*(.+)$/;
+  const participants = new Set<string>();
+  const matchedLines: string[] = [];
+
+  for (const line of normalized) {
+    const match = messagePattern.exec(line);
+    if (!match) continue;
+    participants.add(match[2]!.trim());
+    matchedLines.push(line);
+  }
+
+  if (matchedLines.length < 2) {
     throw new Error('KakaoTalk export format is invalid or unsupported.');
   }
+
+  return {
+    metadata: {
+      lineCount: normalized.length,
+      messageCount: matchedLines.length,
+      participantCount: participants.size,
+    },
+    normalizedText: matchedLines.join('\n'),
+  };
 }
 
 function createAuditEvent(
@@ -746,12 +773,12 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
     uploadKakaoTxt({ fileName, fileText = DEFAULT_SAMPLE, retainRawUpload = state.retainRawUploads }) {
       if (!fileName.endsWith('.txt')) throw new Error('Only KakaoTalk .txt exports are accepted.');
       if (Buffer.byteLength(fileText, 'utf8') > 2 * 1024 * 1024) throw new Error('KakaoTalk export exceeds 2MB upload limit.');
-      validateKakaoExport(fileText);
+      const parsed = parseKakaoExport(fileText);
       const upload: ConversationUpload = {
         id: nextId('upload', counters),
         userId: state.currentUserId,
         fileName,
-        rawText: fileText,
+        rawText: parsed.normalizedText,
         retainRawUpload,
         rawDeletionStatus: 'pending',
         createdAt: now(),
@@ -764,13 +791,15 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
     sanitizeConversation(uploadId) {
       const upload = state.uploads.find((u) => u.id === uploadId);
       if (!upload) throw new Error('Upload not found.');
-      const { sanitizedText, summary } = redact(upload.rawText ?? '');
+      const parsed = parseKakaoExport(upload.rawText ?? '');
+      const { sanitizedText, summary } = redact(parsed.normalizedText);
       const sanitized: SanitizedConversation = {
         id: nextId('sanitized', counters),
         uploadId,
         userId: upload.userId,
         sanitizedText,
         redactionSummary: summary,
+        metadata: parsed.metadata,
         confirmedAt: null,
       };
       state.sanitizedConversations.push(sanitized);

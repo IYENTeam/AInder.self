@@ -34,6 +34,22 @@ test('upload rejects malformed KakaoTalk exports', () => {
   );
 });
 
+test('parsed Kakao metadata is preserved on sanitized conversation', () => {
+  const store = createAinderStore({ seedDemo: true });
+  const upload = store.uploadKakaoTxt({
+    fileName: 'sample.txt',
+    fileText: [
+      '2026. 5. 20. 오후 8:01, 민지 : 오늘 회사 앞 강남역에서 봤잖아',
+      '2026. 5. 20. 오후 8:02, 나 : 010-1234-5678로 전화하지 말고 카톡해줘',
+      '2026. 5. 20. 오후 8:04, 민지 : 너는 왜 그렇게 느꼈는지 꼭 물어보더라',
+    ].join('\n'),
+  });
+  const sanitized = store.sanitizeConversation(upload.id);
+  assert.equal(sanitized.metadata.messageCount, 3);
+  assert.equal(sanitized.metadata.participantCount, 2);
+  assert.ok(sanitized.metadata.lineCount >= 3);
+});
+
 test('store request context is written into audit and provider records', () => {
   const store = createAinderStore({ seedDemo: true });
   store.setRequestContext('req-123');
