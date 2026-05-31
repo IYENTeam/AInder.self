@@ -224,7 +224,9 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
   const { entries, renders, hostDisplayMode, sending, send, handleAppMessage, abort } =
     useMcpAppsChat({
       chatEndpoint: `${agentEndpoint}/agent`,
-      snapshotEndpoint: `${agentEndpoint}/agent`,
+      // Disable mount-time snapshot fetch for stale URL chat ids; the local
+      // tunnel backend currently keeps snapshots in-memory, so browser URLs can
+      // outlive the backend process and create noisy 404s.
       ...(chatId !== undefined ? { chatId } : {}),
       onChatAllocated,
       getAuthToken,
