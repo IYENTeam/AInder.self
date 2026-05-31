@@ -1,64 +1,58 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 
-const REQUIRED = [
+const isUrl = (value, { requireHttps = false } = {}) => {
+  try {
+    const url = new URL(value);
+    return requireHttps ? url.protocol === 'https:' : url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+const isLocalhost = (value) => /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::|\/|$)/i.test(value);
+
+const required = [
   'OPENAI_API_KEY',
   'AINDER_SESSION_SECRET',
-  'AINDER_BOOTSTRAP_USER_ID',
-  'AINDER_BOOTSTRAP_PASSWORD_HASH',
   'AINDER_ALLOWED_ORIGINS',
-  'AINDER_DATA_FILE',
   'GGUI_MCP_URL',
   'GGUI_AINDER_MCP_URL',
   'VITE_AGENT_ENDPOINT_URL',
 ];
 
-const failures = [];
+const urlVars = ['GGUI_MCP_URL', 'GGUI_AINDER_MCP_URL', 'VITE_AGENT_ENDPOINT_URL'];
+const errors = [];
 
-for (const name of REQUIRED) {
-  if (!process.env[name]?.trim()) failures.push(`${name} is required`);
+for (const name of required) {
+  if (!process.env[name]?.trim()) errors.push(`${name} is required`);
 }
 
-for (const name of ['GGUI_MCP_URL', 'GGUI_AINDER_MCP_URL', 'VITE_AGENT_ENDPOINT_URL']) {
+for (const name of urlVars) {
   const value = process.env[name]?.trim();
   if (!value) continue;
-  try {
-    const url = new URL(value);
-    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
-      failures.push(`${name} must not point at localhost in production`);
-    }
-  } catch {
-    failures.push(`${name} must be a valid URL`);
+  const requireHttps = process.env.NODE_ENV === 'production' && name === 'VITE_AGENT_ENDPOINT_URL';
+  if (!isUrl(value, { requireHttps })) errors.push(`${name} must be a valid ${requireHttps ? 'https' : 'http(s)'} URL`);
+  if (process.env.NODE_ENV === 'production' && isLocalhost(value)) errors.push(`${name} must not point at localhost in production`);
+}
+
+for (const origin of (process.env.AINDER_ALLOWED_ORIGINS ?? '').split(',').map((v) => v.trim()).filter(Boolean)) {
+  if (!isUrl(origin, { requireHttps: process.env.NODE_ENV === 'production' })) errors.push(`AINDER_ALLOWED_ORIGINS contains an invalid URL: ${origin}`);
+  if (process.env.NODE_ENV === 'production' && isLocalhost(origin)) {
+    errors.push(`AINDER_ALLOWED_ORIGINS must not include localhost in production: ${origin}`);
   }
 }
 
-for (const origin of (process.env.AINDER_ALLOWED_ORIGINS ?? '').split(',')) {
-  const trimmed = origin.trim();
-  if (!trimmed) continue;
-  try {
-    new URL(trimmed);
-  } catch {
-    failures.push(`AINDER_ALLOWED_ORIGINS contains invalid URL: ${trimmed}`);
-  }
+if (process.env.NODE_ENV === 'production' && process.env.AINDER_ALLOW_DEMO_BOOTSTRAP === 'true') {
+  errors.push('AINDER_ALLOW_DEMO_BOOTSTRAP must not be true in production');
+}
+if (process.env.NODE_ENV === 'production' && process.env.AINDER_ENABLE_ADMIN_DEBUG === 'true') {
+  errors.push('AINDER_ENABLE_ADMIN_DEBUG must not be true in production');
 }
 
-const sessionSecret = process.env.AINDER_SESSION_SECRET?.trim() ?? '';
-if (sessionSecret && sessionSecret.length < 32) {
-  failures.push('AINDER_SESSION_SECRET must be at least 32 characters');
-}
-
-const passwordHash = process.env.AINDER_BOOTSTRAP_PASSWORD_HASH?.trim() ?? '';
-if (passwordHash && !passwordHash.startsWith('scrypt:')) {
-  failures.push('AINDER_BOOTSTRAP_PASSWORD_HASH must be a scrypt hash');
-}
-
-if (process.env.AINDER_ALLOW_DEMO_SEEDING === 'true') {
-  failures.push('AINDER_ALLOW_DEMO_SEEDING must not be true in production');
-}
-
-if (failures.length > 0) {
+if (errors.length > 0) {
   console.error('Production environment validation failed:');
-  for (const failure of failures) console.error(`- ${failure}`);
+  for (const error of errors) console.error(` - ${error}`);
   process.exit(1);
 }
 

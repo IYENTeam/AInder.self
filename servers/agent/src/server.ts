@@ -1,15 +1,14 @@
 /**
- * OpenAI Agents SDK AInder backend — `@ggui-ai/agent-server` wired to
- * {@link createOpenAiAgentAdapter} with production auth hooks.
+ * OpenAI Agents SDK backend — `@ggui-ai/agent-server` wired to the AInder
+ * production auth posture.
  */
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   startAgentServer,
   type AgentServerHandle,
   type AuthAdapter,
   type McpServerConfig,
+  type Principal,
 } from '@ggui-ai/agent-server';
 import { createOpenAiAgentAdapter } from './agent.js';
 
@@ -19,7 +18,152 @@ export interface ServerOptions {
   readonly model?: string;
   readonly systemPrompt?: string | null;
   readonly sandboxProxyPort?: number;
-  readonly auth?: AuthAdapter;
+  readonly allowedOrigins?: readonly string[];
+  readonly sessionSecret?: string;
+}
+
+type SessionRecord = {
+  readonly userId: string;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+};
+
+type MountRouter = {
+  get(path: string, handler: (c: any) => Response | Promise<Response>): void;
+  post(path: string, handler: (c: any) => Response | Promise<Response>): void;
+};
+
+const COOKIE_NAME = 'ainder_session';
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+
+function parseCookie(header: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const chunk of (header ?? '').split(';')) {
+    const [rawKey, ...rawValue] = chunk.trim().split('=');
+    if (!rawKey || rawValue.length === 0) continue;
+    out[rawKey] = rawValue.join('=');
+  }
+  return out;
+}
+
+function sign(value: string, secret: string): string {
+  return createHmac('sha256', secret).update(value).digest('base64url');
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  const aBytes = Buffer.from(a);
+  const bBytes = Buffer.from(b);
+  return aBytes.byteLength === bBytes.byteLength && timingSafeEqual(aBytes, bBytes);
+}
+
+function createSessionAuth(opts: {
+  readonly secret: string;
+  readonly allowedOrigins: readonly string[];
+  readonly secureCookies: boolean;
+}): AuthAdapter {
+  const sessions = new Map<string, SessionRecord>();
+  const allowed = new Set(opts.allowedOrigins);
+
+  function verifyToken(token: string | undefined): SessionRecord | null {
+    if (!token) return null;
+    const [id, mac] = token.split('.');
+    if (!id || !mac || !constantTimeEqual(sign(id, opts.secret), mac)) return null;
+    const session = sessions.get(id);
+    if (!session || session.expiresAt <= Date.now()) {
+      if (id) sessions.delete(id);
+      return null;
+    }
+    return session;
+  }
+
+  function createCookie(userId: string): string {
+    const id = randomBytes(32).toString('base64url');
+    sessions.set(id, { userId, createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS });
+    const flags = [
+      `${COOKIE_NAME}=${id}.${sign(id, opts.secret)}`,
+      'HttpOnly',
+      'Path=/',
+      'SameSite=None',
+      `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+    ];
+    if (opts.secureCookies) flags.push('Secure');
+    return flags.join('; ');
+  }
+
+  function originAllowed(req: Request): boolean {
+    const origin = req.headers.get('origin');
+    return !origin || allowed.size === 0 || allowed.has(origin);
+  }
+
+  function authResult(req: Request) {
+    if (!originAllowed(req)) return null;
+    const session = verifyToken(parseCookie(req.headers.get('cookie'))[COOKIE_NAME]);
+    if (!session) return null;
+    return {
+      principal: { kind: 'user', userId: session.userId } satisfies Principal,
+      responseHeaders: securityHeaders(req),
+    };
+  }
+
+  function securityHeaders(req: Request): HeadersInit {
+    const headers: Record<string, string> = {
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+      'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    };
+    const origin = req.headers.get('origin');
+    if (origin && allowed.has(origin)) {
+      headers['Access-Control-Allow-Origin'] = origin;
+      headers['Access-Control-Allow-Credentials'] = 'true';
+      headers.Vary = 'Origin';
+    }
+    return headers;
+  }
+
+  return {
+    async authenticate(req) {
+      return authResult(req);
+    },
+    mount(router: MountRouter) {
+      router.get('/session', (c) => {
+        const result = authResult(c.req.raw as Request);
+        if (!result) return c.json({ authenticated: false }, 401, securityHeaders(c.req.raw));
+        return c.json({ authenticated: true }, 200, result.responseHeaders);
+      });
+      router.post('/login', async (c) => {
+        const body = await c.req.json().catch(() => ({}));
+        const userId = typeof body.userId === 'string' ? body.userId : '';
+        const password = typeof body.password === 'string' ? body.password : '';
+        if (
+          userId.length === 0 ||
+          password.length === 0 ||
+          userId !== process.env.AINDER_BOOTSTRAP_USER ||
+          password !== process.env.AINDER_BOOTSTRAP_PASSWORD
+        ) {
+          return c.json({ authenticated: false }, 401, securityHeaders(c.req.raw));
+        }
+        return c.json(
+          { authenticated: true },
+          200,
+          { ...securityHeaders(c.req.raw), 'Set-Cookie': createCookie(userId) },
+        );
+      });
+      router.post('/logout', (c) => {
+        const token = parseCookie((c.req.raw as Request).headers.get('cookie'))[COOKIE_NAME];
+        const id = token?.split('.')[0];
+        if (id) sessions.delete(id);
+        return c.json(
+          { authenticated: false },
+          200,
+          {
+            ...securityHeaders(c.req.raw),
+            'Set-Cookie': `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=None; Max-Age=0${opts.secureCookies ? '; Secure' : ''}`,
+          },
+        );
+      });
+    },
+  };
 }
 
 interface CookieSessionAuthOptions {
@@ -44,9 +188,16 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 export async function startServer(
   opts: ServerOptions,
 ): Promise<AgentServerHandle> {
+  const auth = createSessionAuth({
+    secret: opts.sessionSecret ?? randomBytes(32).toString('base64url'),
+    allowedOrigins: opts.allowedOrigins ?? [],
+    secureCookies: process.env.NODE_ENV === 'production',
+  });
+
   return startAgentServer({
     port: opts.port,
     mcpServers: opts.mcpServers,
+    auth,
     adapter: createOpenAiAgentAdapter(
       opts.model !== undefined ? { model: opts.model } : {},
     ),

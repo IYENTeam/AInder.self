@@ -57,10 +57,7 @@ interface ChatProps {
   readonly sandboxUrl: string;
 }
 
-// Development-only guest-token flow. Production uses the agent backend's
-// secure, server-side cookie session and never stores bearer credentials in
-// localStorage.
-const LS_DEV_GUEST_TOKEN = 'ainder-dev/guestToken';
+// Chat id is URL-resident so cross-tab links land on the same conversation.
 const URL_CHAT_PARAM = 'chat';
 
 type AuthState = 'checking' | 'authenticated' | 'unauthenticated';
@@ -123,57 +120,36 @@ function getInitialChatId(): string | undefined {
   );
   return fromUrl && fromUrl.length > 0 ? fromUrl : undefined;
 }
+type SessionBootstrapState = 'checking' | 'ready' | 'unauthenticated';
+
 /**
  * Chat panel + iframe area for an MCP-Apps-spec agent backend.
  *
- * Auth: production uses secure cookie + server-side session auth. The legacy
- * bearer guest token remains available only in local development so demos and
- * e2e harnesses can run without a provisioned auth backend.
+ * Auth: production uses secure, HttpOnly cookie sessions owned by the
+ * backend. The browser never mints, caches, or refreshes guest bearer tokens.
  */
 export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
-  const devGuestTokenRef = useRef<string | null>(null);
-  const [authState, setAuthState] = useState<AuthState>('checking');
-  const [loginUserId, setLoginUserId] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
-  const [loginError, setLoginError] = useState<string | null>(null);
+  const [sessionState, setSessionState] =
+    useState<SessionBootstrapState>('checking');
 
+  // Boot: verify the backend has an authenticated cookie session. Missing
+  // session is surfaced as a closed state; there is intentionally no
+  // production guest-token fallback.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       setAuthState('checking');
       setLoginError(null);
       try {
-        if (await hasCookieSession(agentEndpoint)) {
-          devGuestTokenRef.current = null;
-          if (!cancelled) setAuthState('authenticated');
-          return;
-        }
-
-        if (!devGuestAuthEnabled()) {
-          if (!cancelled) setAuthState('unauthenticated');
-          return;
-        }
-
-        const cached =
-          typeof window !== 'undefined'
-            ? window.localStorage.getItem(LS_DEV_GUEST_TOKEN)
-            : null;
-        if (cached && cached.length > 0) {
-          devGuestTokenRef.current = cached;
-          if (!cancelled) setAuthState('authenticated');
-          return;
-        }
-
-        const fresh = await mintDevGuestToken(agentEndpoint);
-        if (cancelled) return;
-        devGuestTokenRef.current = fresh;
-        window.localStorage.setItem(LS_DEV_GUEST_TOKEN, fresh);
-        setAuthState('authenticated');
+        const res = await fetch(`${agentEndpoint}/auth/session`, {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+        });
+        if (!cancelled) setSessionState(res.ok ? 'ready' : 'unauthenticated');
       } catch (err) {
-        console.warn('[Chat] auth bootstrap failed', err);
-        if (!cancelled) {
-          setAuthState(devGuestAuthEnabled() ? 'authenticated' : 'unauthenticated');
-        }
+        console.warn('[Chat] session bootstrap failed', err);
+        if (!cancelled) setSessionState('unauthenticated');
       }
     })();
     return () => {
@@ -185,27 +161,8 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     getInitialChatId(),
   );
 
-  const getAuthToken = useCallback(
-    () => devGuestTokenRef.current ?? undefined,
-    [],
-  );
 
-  const onUnauthenticated = useCallback(async (): Promise<boolean> => {
-    if (!devGuestAuthEnabled()) {
-      setAuthState('unauthenticated');
-      return false;
-    }
 
-    try {
-      const fresh = await mintDevGuestToken(agentEndpoint);
-      devGuestTokenRef.current = fresh;
-      window.localStorage.setItem(LS_DEV_GUEST_TOKEN, fresh);
-      return true;
-    } catch (err) {
-      console.warn('[Chat] development guest-token refresh failed', err);
-      return false;
-    }
-  }, [agentEndpoint]);
   // Stamp the server-allocated chatId into URL + state once
   // received. Quiet when the URL already carries the right id (this
   // covers the rehydration path).
@@ -225,8 +182,6 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
       snapshotEndpoint: `${agentEndpoint}/agent`,
       ...(chatId !== undefined ? { chatId } : {}),
       onChatAllocated,
-      getAuthToken,
-      onUnauthenticated,
     });
 
   const [prompt, setPrompt] = useState('');
@@ -279,26 +234,19 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     }
   };
 
-  const onLoginSubmit = (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setLoginError(null);
-    void (async () => {
-      try {
-        await loginWithCookieSession(agentEndpoint, loginUserId.trim(), loginPassword);
-        devGuestTokenRef.current = null;
-        setLoginPassword('');
-        setAuthState('authenticated');
-      } catch (err) {
-        setLoginError(err instanceof Error ? err.message : String(err));
-        setAuthState('unauthenticated');
-      }
-    })();
-  };
-
-  if (authState === 'checking') {
+  if (sessionState === 'checking') {
     return (
       <div style={{ padding: 24, color: '#888', fontFamily: 'system-ui' }}>
         Checking secure session…
+      </div>
+    );
+  }
+
+  if (sessionState === 'unauthenticated') {
+    return (
+      <div style={{ padding: 24, color: '#c00', fontFamily: 'system-ui' }}>
+        Sign in is required before opening AInder chat. Guest browser auth is
+        disabled outside explicit local development.
       </div>
     );
   }

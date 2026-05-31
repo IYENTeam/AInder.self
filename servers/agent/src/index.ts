@@ -1,8 +1,26 @@
 /* eslint-disable no-console */
 /**
- * Boot entry point — wires environment variables to the AInder HTTP agent.
- * Production intentionally fails closed on missing auth, origin, provider, and
- * MCP endpoint configuration; localhost/sample defaults are dev-only.
+ * Boot entry point — wires environment variables to the HTTP server.
+ *
+ * Env vars consumed here:
+ *
+ *   PORT                     Chat backend HTTP port (default 6790 in dev)
+ *   SANDBOX_PROXY_PORT       Spec-mandated second-origin sandbox port
+ *   GGUI_MCP_URL             Primary ggui MCP endpoint
+ *   GGUI_AINDER_MCP_URL      AInder domain MCP endpoint
+ *   AINDER_ALLOWED_ORIGINS   Comma-separated browser origins allowed in prod
+ *   AINDER_SESSION_SECRET    Required in production for cookie sessions
+ *   OPENAI_MODEL             Override the default OpenAI model
+ *   SYSTEM_PROMPT            Override the default ggui-agent system prompt.
+ *                            Set to `none` to disable entirely.
+ *   OPENAI_API_KEY           Required. The agent fails-fast AT BOOT if absent.
+ *
+ * Adding another MCP server: one entry below + one env var.
+ *
+ * Auto-loads `.env.local` walking up from this file, so a workspace-
+ * root `.env.local` is picked up without explicit sourcing. External
+ * devs cloning the sample drop their `.env.local` next to package.json
+ * and it's found the same way.
  */
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -95,42 +113,84 @@ function resolveAuth(): AuthAdapter | undefined {
   });
 }
 
-if (!process.env.OPENAI_API_KEY?.trim()) {
-  console.error(
-    '\n[ainder-agent] OPENAI_API_KEY is not set — the agent loop and ' +
-      "ggui's UI generation both require it.\n" +
-      '  Add it to .env.local (copy .env.example), then restart.\n',
-  );
-  process.exit(1);
+const NODE_ENV = process.env.NODE_ENV ?? 'development';
+const IS_PRODUCTION = NODE_ENV === 'production';
+
+function requireEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    console.error(`\n[ainder-agent] ${name} is required.\n`);
+    process.exit(1);
+  }
+  return value;
 }
 
-try {
-  const PORT = Number(process.env.PORT ?? 6790);
-  const SANDBOX_PROXY_PORT = process.env.SANDBOX_PROXY_PORT
-    ? Number(process.env.SANDBOX_PROXY_PORT)
-    : 7791;
-  const MODEL = process.env.OPENAI_MODEL ?? process.env.MODEL;
-  const SYSTEM_PROMPT_ENV = process.env.SYSTEM_PROMPT;
-  const systemPrompt =
-    SYSTEM_PROMPT_ENV === 'none'
-      ? null
-      : SYSTEM_PROMPT_ENV !== undefined
-        ? SYSTEM_PROMPT_ENV
-        : AINDER_SYSTEM_PROMPT;
-  const auth = resolveAuth();
-
-  startServer({
-    port: PORT,
-    sandboxProxyPort: SANDBOX_PROXY_PORT,
-    mcpServers: resolveMcpServers(),
-    ...(MODEL ? { model: MODEL } : {}),
-    ...(systemPrompt !== undefined ? { systemPrompt } : {}),
-    ...(auth ? { auth } : {}),
-  }).catch((err: unknown) => {
-    console.error('[ainder-agent] failed to start:', err);
+function assertNotLocalhost(name: string, value: string): void {
+  if (/^https?:\/\/(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)(?::|\/|$)/i.test(value)) {
+    console.error(`\n[ainder-agent] ${name} must not point at localhost in production.\n`);
     process.exit(1);
-  });
-} catch (err) {
-  console.error('[ainder-agent] invalid configuration:', err);
+  }
+}
+
+requireEnv('OPENAI_API_KEY');
+
+if (IS_PRODUCTION) {
+  requireEnv('AINDER_ALLOWED_ORIGINS');
+  requireEnv('AINDER_SESSION_SECRET');
+}
+const ALLOWED_ORIGINS = (process.env.AINDER_ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const PORT = Number(process.env.PORT ?? (IS_PRODUCTION ? '' : 6790));
+if (!Number.isFinite(PORT) || PORT <= 0) {
+  console.error('\n[ainder-agent] PORT is required in production and must be a positive number.\n');
+  process.exit(1);
+}
+const SANDBOX_PROXY_PORT = process.env.SANDBOX_PROXY_PORT
+  ? Number(process.env.SANDBOX_PROXY_PORT)
+  : IS_PRODUCTION
+    ? undefined
+    : 7791;
+const MODEL = process.env.OPENAI_MODEL;
+const SYSTEM_PROMPT_ENV = process.env.SYSTEM_PROMPT;
+const systemPrompt =
+  SYSTEM_PROMPT_ENV === 'none'
+    ? null
+    : SYSTEM_PROMPT_ENV !== undefined
+      ? SYSTEM_PROMPT_ENV
+      : AINDER_SYSTEM_PROMPT;
+
+// MCP servers the agent can call into. Production requires explicit endpoints;
+// local development keeps the documented localhost convenience default.
+const gguiMcpUrl = process.env.GGUI_MCP_URL ?? (IS_PRODUCTION ? '' : 'http://localhost:6781/mcp');
+if (!gguiMcpUrl) {
+  console.error('\n[ainder-agent] GGUI_MCP_URL is required in production.\n');
+  process.exit(1);
+}
+if (IS_PRODUCTION) assertNotLocalhost('GGUI_MCP_URL', gguiMcpUrl);
+
+const mcpServers: Record<string, McpServerConfig> = {
+  ggui: { url: gguiMcpUrl },
+};
+for (const [key, url] of Object.entries(process.env)) {
+  const match = /^GGUI_(.+)_MCP_URL$/.exec(key);
+  if (match && url) {
+    if (IS_PRODUCTION) assertNotLocalhost(key, url);
+    mcpServers[match[1].toLowerCase()] = { url };
+  }
+}
+
+startServer({
+  port: PORT,
+  sandboxProxyPort: SANDBOX_PROXY_PORT,
+  mcpServers,
+  allowedOrigins: ALLOWED_ORIGINS,
+  sessionSecret: process.env.AINDER_SESSION_SECRET,
+  ...(MODEL ? { model: MODEL } : {}),
+  ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+}).catch((err: unknown) => {
+  console.error('[sample-agent] failed to start:', err);
   process.exit(1);
 }

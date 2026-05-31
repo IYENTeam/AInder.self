@@ -1,6 +1,5 @@
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+
 export type Visibility = 'public' | 'private' | 'hidden';
 export type PersonaConversationMode = 'direct' | 'simulation';
 export type ProviderStatus = 'notStarted' | 'providerSuccess' | 'providerFailure' | 'cachedDemo' | 'seededFallback';
@@ -161,6 +160,25 @@ export interface ConsentRecord {
   visiblePayloadSummary: string;
   createdAt: string;
 }
+export interface AuditEvent {
+  id: string;
+  requestId: string | null;
+  actorUserId: string | null;
+  eventType:
+    | 'auth.signup'
+    | 'auth.login_success'
+    | 'auth.login_failure'
+    | 'upload.created'
+    | 'upload.raw_deleted'
+    | 'upload.raw_retained'
+    | 'provider.egress_blocked'
+    | 'provider.egress_allowed'
+    | 'consent.recorded'
+    | 'report.reveal_requested';
+  subjectId: string | null;
+  createdAt: string;
+}
+
 
 export interface AuthAuditEvent {
   id: string;
@@ -200,8 +218,7 @@ export interface AinderState {
   councilRuns: CocounCouncilRun[];
   reports: MatchReport[];
   consents: ConsentRecord[];
-  auditEvents: AuthAuditEvent[];
-  providerCalls: ProviderCallRecord[];
+  auditEvents: AuditEvent[];
 }
 
 export interface AinderStore {
@@ -251,6 +268,10 @@ export interface AinderStore {
   getMatchReport(reportId: string): MatchReport | null;
 }
 
+export interface AinderStoreOptions {
+  readonly demoBootstrap?: boolean;
+}
+
 const DEFAULT_SAMPLE = `2026. 5. 20. 오후 8:01, 민지 : 오늘 회사 앞 강남역에서 봤잖아\n2026. 5. 20. 오후 8:02, 나 : 010-1234-5678로 전화하지 말고 카톡해줘\n2026. 5. 20. 오후 8:04, 민지 : 너는 왜 그렇게 느꼈는지 꼭 물어보더라\n2026. 5. 20. 오후 8:05, 나 : 결론보다 그때 기분이 어땠는지가 궁금해\n2026. 5. 20. 오후 8:06, 민지 : 급하게 정하는 건 부담스러워하는 편이지?\n2026. 5. 20. 오후 8:07, 나 : 응 천천히 알아가는 게 좋아`;
 
 function now(): string {
@@ -258,32 +279,17 @@ function now(): string {
 }
 
 function hashPassword(password: string): string {
-  const salt = randomBytes(16).toString('hex');
-  const hash = scryptSync(password, salt, 64).toString('hex');
-  return `scrypt:${salt}:${hash}`;
+  const salt = randomBytes(16).toString('base64url');
+  const derived = scryptSync(password, salt, 64).toString('base64url');
+  return `scrypt:v1:${salt}:${derived}`;
 }
 
-function verifyPassword(password: string, encoded: string): boolean {
-  if (encoded.startsWith('scrypt:')) {
-    const [, salt, expected] = encoded.split(':');
-    if (!salt || !expected) return false;
-    const actual = scryptSync(password, salt, 64).toString('hex');
-    return constantTimeEqual(actual, expected);
-  }
-
-  // Legacy demo hashes are accepted only to let old local data migrate on
-  // login; new users and seeded dev users are always written with scrypt.
-  if (encoded.startsWith('demo-hash:')) {
-    return encoded === `demo-hash:${Buffer.from(password).toString('base64')}`;
-  }
-
-  return false;
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  return left.length === right.length && timingSafeEqual(left, right);
+function verifyPassword(password: string, stored: string): boolean {
+  const [, version, salt, expected] = stored.split(':');
+  if (version !== 'v1' || !salt || !expected) return false;
+  const actual = scryptSync(password, salt, 64);
+  const expectedBytes = Buffer.from(expected, 'base64url');
+  return actual.byteLength === expectedBytes.byteLength && timingSafeEqual(actual, expectedBytes);
 }
 
 function nextId(prefix: string, counters: Map<string, number>): string {
@@ -297,7 +303,11 @@ function redact(text: string): { sanitizedText: string; summary: Array<{ categor
   const summary: Array<{ category: string; count: number }> = [];
   const patterns: Array<[string, RegExp, string]> = [
     ['phone', /01\d-?\d{3,4}-?\d{4}/g, '[전화번호]'],
-    ['location', /(강남역|홍대|잠실|서울|부산|회사 앞)/g, '[위치]'],
+    ['email', /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[이메일]'],
+    ['account_id', /(?:카카오톡?\s*ID|카톡\s*ID|계정|아이디)[:：]?\s*[A-Za-z0-9._-]{3,}/gi, '[계정ID]'],
+    ['address', /(?:서울|부산|대구|인천|광주|대전|울산|경기|강남|홍대|잠실)[^\n,]*(?:로|길|동|역|아파트|오피스텔|회사 앞)/g, '[주소/위치]'],
+    ['employer_school', /(?:회사|직장|학교|대학교|대학원|팀|부서)\s*[:：]?\s*[가-힣A-Za-z0-9]+/g, '[직장/학교]'],
+    ['sensitive_phrase', /(주민등록번호|계좌번호|비밀번호|병원|진단|투약|성폭력|자해|스토킹)/g, '[민감표현]'],
     ['name_or_nickname', /(민지|도윤|하린|준)/g, '[이름]'],
   ];
   for (const [category, pattern, replacement] of patterns) {
@@ -310,13 +320,43 @@ function redact(text: string): { sanitizedText: string; summary: Array<{ categor
   return { sanitizedText, summary };
 }
 
-function assertExternalCallAllowed(state: AinderState, userId: string): void {
+function createAuditEvent(
+  state: AinderState,
+  counters: Map<string, number>,
+  event: Omit<AuditEvent, 'id' | 'createdAt'>,
+): AuditEvent {
+  const audit: AuditEvent = {
+    id: nextId('audit', counters),
+    createdAt: now(),
+    ...event,
+  };
+  state.auditEvents.push(audit);
+  return audit;
+}
+
+function assertExternalCallAllowed(
+  state: AinderState,
+  counters: Map<string, number>,
+  userId: string,
+): void {
   const pending = state.uploads.some(
     (u) => u.userId === userId && u.rawDeletionStatus === 'pending',
   );
   if (pending) {
+    createAuditEvent(state, counters, {
+      requestId: null,
+      actorUserId: userId,
+      eventType: 'provider.egress_blocked',
+      subjectId: userId,
+    });
     throw new Error('External calls are blocked until raw deletion or retention decision is complete.');
   }
+  createAuditEvent(state, counters, {
+    requestId: null,
+    actorUserId: userId,
+    eventType: 'provider.egress_allowed',
+    subjectId: userId,
+  });
 }
 
 function createSeedState(): AinderState {
@@ -405,21 +445,15 @@ function createSeedState(): AinderState {
     reports: [],
     consents: [],
     auditEvents: [],
-    providerCalls: [],
   };
-}
-
-export interface AinderStoreOptions {
-  readonly dataFile?: string;
-  readonly allowSeedData?: boolean;
 }
 
 function createEmptyState(): AinderState {
   return {
-    ...createSeedState(),
     currentUserId: '',
-    builderOpenAiKeyConfigured: false,
-    cocounKeyConfigured: false,
+    builderOpenAiKeyConfigured: process.env.OPENAI_API_KEY !== undefined,
+    cocounKeyConfigured: process.env.COCOUN_API_KEY !== undefined,
+    retainRawUploads: false,
     users: [],
     uploads: [],
     sanitizedConversations: [],
@@ -434,30 +468,11 @@ function createEmptyState(): AinderState {
     reports: [],
     consents: [],
     auditEvents: [],
-    providerCalls: [],
   };
 }
 
-function loadState(opts: AinderStoreOptions): AinderState {
-  if (opts.dataFile && existsSync(opts.dataFile)) {
-    const parsed = JSON.parse(readFileSync(opts.dataFile, 'utf8')) as AinderState;
-    return {
-      ...parsed,
-      auditEvents: parsed.auditEvents ?? [],
-      providerCalls: parsed.providerCalls ?? [],
-    };
-  }
-  return opts.allowSeedData === false ? createEmptyState() : createSeedState();
-}
-
-function persistState(state: AinderState, dataFile: string | undefined): void {
-  if (!dataFile) return;
-  mkdirSync(dirname(dataFile), { recursive: true });
-  writeFileSync(dataFile, JSON.stringify(state, null, 2));
-}
-
-export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
-  let state = loadState(opts);
+export function createAinderStore(options: AinderStoreOptions = {}): AinderStore {
+  let state = options.demoBootstrap === true ? createSeedState() : createEmptyState();
   const counters = new Map<string, number>();
   const persist = () => persistState(state, opts.dataFile);
   const audit = (
@@ -510,7 +525,7 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
     state: () => state,
     persist,
     reset() {
-      state = opts.allowSeedData === false ? createEmptyState() : createSeedState();
+      state = options.demoBootstrap === true ? createSeedState() : createEmptyState();
       counters.clear();
       persist();
     },
@@ -526,20 +541,33 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       };
       state.users.push(user);
       state.currentUserId = user.id;
+      createAuditEvent(state, counters, {
+        requestId: null,
+        actorUserId: user.id,
+        eventType: 'auth.signup',
+        subjectId: user.id,
+      });
       return user;
     },
     login(userId, password) {
       const user = state.users.find((u) => u.userId === userId);
-      if (!user || !verifyPassword(password, user.passwordHash)) {
-        audit('login', 'failure', null, user?.id ?? userId);
-        return null;
+      if (user && verifyPassword(password, user.passwordHash)) {
+        state.currentUserId = user.id;
+        createAuditEvent(state, counters, {
+          requestId: null,
+          actorUserId: user.id,
+          eventType: 'auth.login_success',
+          subjectId: user.id,
+        });
+        return user;
       }
-      if (user.passwordHash.startsWith('demo-hash:')) {
-        user.passwordHash = hashPassword(password);
-      }
-      state.currentUserId = user.id;
-      audit('login', 'success', null, user.id);
-      return user;
+      createAuditEvent(state, counters, {
+        requestId: null,
+        actorUserId: null,
+        eventType: 'auth.login_failure',
+        subjectId: userId,
+      });
+      return null;
     },
     currentUser,
     configureBuilderOpenAiKey() {
@@ -562,7 +590,12 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
         visiblePayloadSummary: `Raw upload retention: ${retainRawUploads}`,
         createdAt: now(),
       });
-      audit('rawRetention', 'success', state.currentUserId);
+      createAuditEvent(state, counters, {
+        requestId: null,
+        actorUserId: state.currentUserId || null,
+        eventType: 'consent.recorded',
+        subjectId: state.currentUserId || null,
+      });
       return { retainRawUploads };
     },
     conversationSourceState(userId = state.currentUserId) {
@@ -578,6 +611,7 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
     },
     uploadKakaoTxt({ fileName, fileText = DEFAULT_SAMPLE, retainRawUpload = state.retainRawUploads }) {
       if (!fileName.endsWith('.txt')) throw new Error('Only KakaoTalk .txt exports are accepted.');
+      if (Buffer.byteLength(fileText, 'utf8') > 2 * 1024 * 1024) throw new Error('KakaoTalk export exceeds 2MB upload limit.');
       const upload: ConversationUpload = {
         id: nextId('upload', counters),
         userId: state.currentUserId,
@@ -588,7 +622,12 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
         createdAt: now(),
       };
       state.uploads.push(upload);
-      audit('upload', 'success', upload.id, upload.userId);
+      createAuditEvent(state, counters, {
+        requestId: null,
+        actorUserId: state.currentUserId || null,
+        eventType: 'upload.created',
+        subjectId: upload.id,
+      });
       return upload;
     },
     sanitizeConversation(uploadId) {
@@ -615,9 +654,21 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
           visiblePayloadSummary: 'User explicitly retained raw upload.',
           createdAt: now(),
         });
+          createAuditEvent(state, counters, {
+            requestId: null,
+            actorUserId: upload.userId,
+            eventType: 'upload.raw_retained',
+            subjectId: upload.id,
+          });
       } else {
         upload.rawText = null;
         upload.rawDeletionStatus = 'deleted';
+        createAuditEvent(state, counters, {
+          requestId: null,
+          actorUserId: upload.userId,
+          eventType: 'upload.raw_deleted',
+          subjectId: upload.id,
+        });
       }
       return sanitized;
     },
@@ -626,6 +677,12 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       if (!upload) throw new Error('Upload not found.');
       upload.rawText = null;
       upload.rawDeletionStatus = 'deleted';
+      createAuditEvent(state, counters, {
+        requestId: null,
+        actorUserId: upload.userId,
+        eventType: 'upload.raw_deleted',
+        subjectId: upload.id,
+      });
       return { deleted: true, rawDeletionStatus: upload.rawDeletionStatus };
     },
     confirmSanitizedConversation(sanitizedConversationId) {
@@ -635,7 +692,7 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       return item;
     },
     generatePersonaProfile(sanitizedConversationId) {
-      assertExternalCallAllowed(state, state.currentUserId);
+      assertExternalCallAllowed(state, counters, state.currentUserId);
       const sanitized = state.sanitizedConversations.find((c) => c.id === sanitizedConversationId);
       if (!sanitized) throw new Error('Sanitized conversation not found.');
       const traits: PersonaTrait[] = [
@@ -806,7 +863,7 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       };
     },
     startDirectPersonaChat(targetUserId) {
-      assertExternalCallAllowed(state, state.currentUserId);
+      assertExternalCallAllowed(state, counters, state.currentUserId);
       const conversation: PersonaConversation = {
         id: nextId('conversation', counters),
         requesterId: state.currentUserId,
@@ -867,7 +924,7 @@ export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
       );
     },
     runToblSimulationTurns(conversationId, turnCount) {
-      assertExternalCallAllowed(state, state.currentUserId);
+      assertExternalCallAllowed(state, counters, state.currentUserId);
       const conversation = state.conversations.find((c) => c.id === conversationId);
       if (!conversation) throw new Error('Conversation not found.');
       const target = Math.min(50, conversation.turnCount + turnCount);

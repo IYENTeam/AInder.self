@@ -3,33 +3,24 @@ import { ThemeProvider, getRawTheme } from '@ggui-ai/design/themes';
 import { Chat } from './Chat';
 
 /**
- * Public agent backend URL. Production bundles fail closed: they must be
- * built with an explicit non-localhost `VITE_AGENT_ENDPOINT_URL` and cannot
- * be retargeted with a query-string override. Local development may still use
- * `?agent=<url>` or the localhost default for worker/e2e convenience.
+ * Public agent backend URL. Production builds fail closed: the browser bundle
+ * must be built with an explicit public agent URL and must never fall back to a
+ * developer localhost backend. Local `pnpm dev` may still use `?agent=<url>` for
+ * harnesses, but shared preview/production deployments rely on
+ * `VITE_AGENT_ENDPOINT_URL`.
  */
 function resolveAgentEndpoint(): string {
-  const configured = import.meta.env.VITE_AGENT_ENDPOINT_URL?.trim();
+  const fromEnv = import.meta.env.VITE_AGENT_ENDPOINT_URL?.trim();
+  if (fromEnv) return fromEnv;
 
-  if (!import.meta.env.PROD && typeof window !== 'undefined') {
-    const fromUrl = new URL(window.location.href).searchParams.get('agent');
-    if (fromUrl !== null && fromUrl.length > 0) return fromUrl;
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    const fromUrl = new URL(window.location.href).searchParams.get('agent')?.trim();
+    if (fromUrl) return fromUrl;
   }
 
-  if (configured) {
-    const parsed = new URL(configured);
-    if (
-      import.meta.env.PROD &&
-      (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
-    ) {
-      throw new Error('Production VITE_AGENT_ENDPOINT_URL must not point at localhost.');
-    }
-    return parsed.toString().replace(/\/$/, '');
-  }
-
-  if (!import.meta.env.PROD) return 'http://localhost:6790';
-
-  throw new Error('Production build requires VITE_AGENT_ENDPOINT_URL.');
+  throw new Error(
+    'VITE_AGENT_ENDPOINT_URL is required; production builds must not fall back to localhost.',
+  );
 }
 
 const AGENT_ENDPOINT = resolveAgentEndpoint();
