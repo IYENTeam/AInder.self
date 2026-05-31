@@ -118,63 +118,68 @@ export function createCookieSessionAuth(opts: CookieSessionAuthOptions): AuthAda
       };
     },
     mount(router: MountRouter) {
-      router.post('/login', async (c: any) => {
-        const req: Request = c.req.raw;
-        const requestId = req.headers.get('x-request-id') ?? randomBytes(8).toString('hex');
-        if (rejectOrigin(req)) return c.json({ error: 'origin_not_allowed' }, 403, headersFor(req, requestId));
-        const body = await parseRequestJson(c);
-        const userId = typeof body.userId === 'string' ? body.userId : '';
-        const password = typeof body.password === 'string' ? body.password : '';
-        if (userId !== opts.userId || !verifyPassword(password, opts.passwordHash)) {
-          return c.json({ error: 'invalid_credentials' }, 401, headersFor(req, requestId));
-        }
-        const rawSessionId = randomBytes(32).toString('base64url');
-        const now = Date.now();
-        sessions.push({
-          sessionIdHash: hashSessionId(opts.sessionSecret, rawSessionId),
-          userId,
-          createdAt: now,
-          expiresAt: now + SESSION_TTL_MS,
-        });
-        persist();
-        return c.json(
-          { authenticated: true, userId },
-          200,
-          {
-            ...headersFor(req, requestId),
-            'Set-Cookie': serializeSessionCookie(rawSessionId, opts.secureCookies),
-          },
-        );
-      });
-
-      router.get('/me', (c: any) => {
-        const req: Request = c.req.raw;
-        const requestId = req.headers.get('x-request-id') ?? randomBytes(8).toString('hex');
-        if (rejectOrigin(req)) return c.json({ error: 'origin_not_allowed' }, 403, headersFor(req, requestId));
-        const session = findSession(req);
-        if (!session) return c.json({ authenticated: false }, 401, headersFor(req, requestId));
-        return c.json({ authenticated: true, userId: session.userId }, 200, headersFor(req, requestId));
-      });
-
-      router.post('/logout', (c: any) => {
-        const req: Request = c.req.raw;
-        const requestId = req.headers.get('x-request-id') ?? randomBytes(8).toString('hex');
-        if (rejectOrigin(req)) return c.json({ error: 'origin_not_allowed' }, 403, headersFor(req, requestId));
-        const rawSessionId = parseCookies(req.headers.get('cookie'))[SESSION_COOKIE];
-        if (rawSessionId) {
-          const hash = hashSessionId(opts.sessionSecret, rawSessionId);
-          sessions = sessions.filter((s) => !constantTimeEqual(s.sessionIdHash, hash));
+      const mountAuthRoutes = (prefix: '' | '/auth') => {
+        router.post(`${prefix}/login`, async (c: any) => {
+          const req: Request = c.req.raw;
+          const requestId = req.headers.get('x-request-id') ?? randomBytes(8).toString('hex');
+          if (rejectOrigin(req)) return c.json({ error: 'origin_not_allowed' }, 403, headersFor(req, requestId));
+          const body = await parseRequestJson(c);
+          const userId = typeof body.userId === 'string' ? body.userId : '';
+          const password = typeof body.password === 'string' ? body.password : '';
+          if (userId !== opts.userId || !verifyPassword(password, opts.passwordHash)) {
+            return c.json({ error: 'invalid_credentials' }, 401, headersFor(req, requestId));
+          }
+          const rawSessionId = randomBytes(32).toString('base64url');
+          const now = Date.now();
+          sessions.push({
+            sessionIdHash: hashSessionId(opts.sessionSecret, rawSessionId),
+            userId,
+            createdAt: now,
+            expiresAt: now + SESSION_TTL_MS,
+          });
           persist();
-        }
-        return c.json(
-          { authenticated: false },
-          200,
-          {
-            ...headersFor(req, requestId),
-            'Set-Cookie': expireSessionCookie(opts.secureCookies),
-          },
-        );
-      });
+          return c.json(
+            { authenticated: true, userId },
+            200,
+            {
+              ...headersFor(req, requestId),
+              'Set-Cookie': serializeSessionCookie(rawSessionId, opts.secureCookies),
+            },
+          );
+        });
+
+        router.get(`${prefix}/me`, (c: any) => {
+          const req: Request = c.req.raw;
+          const requestId = req.headers.get('x-request-id') ?? randomBytes(8).toString('hex');
+          if (rejectOrigin(req)) return c.json({ error: 'origin_not_allowed' }, 403, headersFor(req, requestId));
+          const session = findSession(req);
+          if (!session) return c.json({ authenticated: false }, 401, headersFor(req, requestId));
+          return c.json({ authenticated: true, userId: session.userId }, 200, headersFor(req, requestId));
+        });
+
+        router.post(`${prefix}/logout`, (c: any) => {
+          const req: Request = c.req.raw;
+          const requestId = req.headers.get('x-request-id') ?? randomBytes(8).toString('hex');
+          if (rejectOrigin(req)) return c.json({ error: 'origin_not_allowed' }, 403, headersFor(req, requestId));
+          const rawSessionId = parseCookies(req.headers.get('cookie'))[SESSION_COOKIE];
+          if (rawSessionId) {
+            const hash = hashSessionId(opts.sessionSecret, rawSessionId);
+            sessions = sessions.filter((s) => !constantTimeEqual(s.sessionIdHash, hash));
+            persist();
+          }
+          return c.json(
+            { authenticated: false },
+            200,
+            {
+              ...headersFor(req, requestId),
+              'Set-Cookie': expireSessionCookie(opts.secureCookies),
+            },
+          );
+        });
+      };
+
+      mountAuthRoutes('');
+      mountAuthRoutes('/auth');
     },
   };
 }

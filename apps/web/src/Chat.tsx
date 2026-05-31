@@ -64,26 +64,7 @@ const URL_CHAT_PARAM = 'chat';
 
 type AuthState = 'checking' | 'authenticated' | 'unauthenticated';
 
-function devGuestAuthEnabled(): boolean {
-  return !import.meta.env.PROD;
-}
 
-/**
- * Mint a fresh development guest token via the agent backend's
- * `POST /auth/guest` mount. This path is intentionally unreachable from
- * production bundles.
- */
-async function mintDevGuestToken(agentEndpoint: string): Promise<string> {
-  const res = await fetch(`${agentEndpoint}/auth/guest`, { method: 'POST' });
-  if (!res.ok) {
-    throw new Error(`POST /auth/guest returned ${res.status}`);
-  }
-  const body = (await res.json()) as { guestToken?: unknown };
-  if (typeof body.guestToken !== 'string' || body.guestToken.length === 0) {
-    throw new Error('POST /auth/guest response missing guestToken');
-  }
-  return body.guestToken;
-}
 
 async function hasCookieSession(agentEndpoint: string): Promise<boolean> {
   const res = await fetch(`${agentEndpoint}/auth/me`, {
@@ -108,6 +89,14 @@ async function loginWithCookieSession(
   if (!res.ok) {
     throw new Error(`login failed (${res.status})`);
   }
+}
+
+async function logoutCookieSession(agentEndpoint: string): Promise<void> {
+  await fetch(`${agentEndpoint}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
 }
 
 /**
@@ -135,13 +124,17 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
   const [chatId, setChatId] = useState<string | undefined>(() =>
     getInitialChatId(),
   );
+  const [authState, setAuthState] = useState<AuthState>('checking');
+  const [loginUserId, setLoginUserId] = useState(import.meta.env.DEV ? 'demo' : '');
+  const [loginPassword, setLoginPassword] = useState(import.meta.env.DEV ? 'demo' : '');
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   const getAuthToken = useCallback(() => undefined, []);
 
-  // Cookie sessions cannot be refreshed by minting a guest bearer token.
-  // A 401 must surface to the user/backend rather than silently creating a
-  // new principal and bypassing audit/revocation semantics.
-  const onUnauthenticated = useCallback(async (): Promise<boolean> => false, []);
+  const onUnauthenticated = useCallback(async (): Promise<boolean> => {
+    setAuthState('unauthenticated');
+    return false;
+  }, []);
 
   // Stamp the server-allocated chatId into URL + state once
   // received. Quiet when the URL already carries the right id (this
@@ -156,12 +149,58 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     });
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const originalFetch = window.fetch.bind(window);
+    const normalizedAgentEndpoint = agentEndpoint.replace(/\/$/, '');
+    window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requestUrl =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (requestUrl.startsWith(normalizedAgentEndpoint)) {
+        return originalFetch(input, {
+          ...init,
+          credentials: init?.credentials ?? 'include',
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof window.fetch;
+    return () => {
+      window.fetch = originalFetch;
+    };
+  }, [agentEndpoint]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const authenticated = await hasCookieSession(agentEndpoint);
+        if (!cancelled) {
+          setAuthState(authenticated ? 'authenticated' : 'unauthenticated');
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setAuthState('unauthenticated');
+          setLoginError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [agentEndpoint]);
+
   const { entries, renders, hostDisplayMode, sending, send, handleAppMessage, abort } =
     useMcpAppsChat({
       chatEndpoint: `${agentEndpoint}/agent`,
       snapshotEndpoint: `${agentEndpoint}/agent`,
       ...(chatId !== undefined ? { chatId } : {}),
       onChatAllocated,
+      getAuthToken,
+      onUnauthenticated,
     });
 
   const [prompt, setPrompt] = useState('');
@@ -193,6 +232,28 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     setChatId(undefined);
   }, [abort]);
 
+  const onLoginSubmit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setLoginError(null);
+    try {
+      await loginWithCookieSession(agentEndpoint, loginUserId, loginPassword);
+      setAuthState('authenticated');
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : String(err));
+      setAuthState('unauthenticated');
+    }
+  };
+
+  const onLogout = async () => {
+    await logoutCookieSession(agentEndpoint);
+    abort();
+    const url = new URL(window.location.href);
+    url.searchParams.delete(URL_CHAT_PARAM);
+    window.history.replaceState({}, '', url.toString());
+    setChatId(undefined);
+    setAuthState('unauthenticated');
+  };
+
   const onSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const text = prompt.trim();
@@ -213,6 +274,81 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
       (e.currentTarget.form as HTMLFormElement).requestSubmit();
     }
   };
+
+  if (authState === 'checking') {
+    return (
+      <div style={{ padding: 24, fontFamily: 'system-ui', color: '#bbb' }}>
+        세션을 확인하는 중…
+      </div>
+    );
+  }
+
+  if (authState === 'unauthenticated') {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'grid',
+          placeItems: 'center',
+          background: '#0b1020',
+          color: '#f4f7ff',
+          fontFamily: 'system-ui',
+          padding: 24,
+        }}
+      >
+        <form
+          onSubmit={onLoginSubmit}
+          style={{
+            width: '100%',
+            maxWidth: 360,
+            display: 'grid',
+            gap: 12,
+            padding: 24,
+            borderRadius: 16,
+            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid rgba(255,255,255,0.12)',
+          }}
+        >
+          <h1 style={{ margin: 0, fontSize: 24 }}>AInder 로그인</h1>
+          <p style={{ margin: 0, color: '#9fb0d0', fontSize: 14 }}>
+            프로덕션 하드닝 단계의 secure session 로그인 게이트입니다.
+          </p>
+          <input
+            value={loginUserId}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setLoginUserId(e.target.value)}
+            placeholder="user id"
+            autoComplete="username"
+            style={{ padding: '12px 14px', borderRadius: 10, border: '1px solid #334', background: '#121936', color: '#fff' }}
+          />
+          <input
+            type="password"
+            value={loginPassword}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setLoginPassword(e.target.value)}
+            placeholder="password"
+            autoComplete="current-password"
+            style={{ padding: '12px 14px', borderRadius: 10, border: '1px solid #334', background: '#121936', color: '#fff' }}
+          />
+          {loginError ? (
+            <div style={{ color: '#ff8a8a', fontSize: 13 }}>{loginError}</div>
+          ) : null}
+          <button
+            type="submit"
+            style={{
+              padding: '12px 14px',
+              borderRadius: 10,
+              border: 0,
+              background: '#5b7cff',
+              color: '#fff',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            로그인
+          </button>
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div className={`layout layout-${layout}`}>
@@ -250,6 +386,14 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
                 Panel
               </button>
             </div>
+            <button
+              type="button"
+              className="new-session"
+              onClick={onLogout}
+              title="Log out"
+            >
+              Logout
+            </button>
           </div>
         </header>
 
