@@ -40,7 +40,7 @@ jobs:
       - name: Build
         run: pnpm build
         env:
-          VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL || 'https://api-ainder.iyen.io' }}
+          VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL || '/api' }}
 
   deploy-worker:
     name: Deploy web shell to Cloudflare Workers
@@ -68,7 +68,7 @@ jobs:
       - name: Build web assets
         run: pnpm --filter ./apps/web build
         env:
-          VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL || 'https://api-ainder.iyen.io' }}
+          VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL || '/api' }}
 
       - name: Deploy Cloudflare Worker
         run: npx wrangler@4.79.0 deploy

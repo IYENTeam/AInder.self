@@ -1,7 +1,6 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import {
   startAgentServer,
   type AgentServerHandle,
@@ -53,9 +52,6 @@ type MountRouter = {
 };
 
 export async function startServer(opts: ServerOptions): Promise<AgentServerHandle> {
-  if (process.env.AINDER_CORS_PROXY === '1') {
-    return startServerBehindCredentialCorsProxy(opts);
-  }
   const handle = await startAgentServer({
     port: opts.port,
     mcpServers: opts.mcpServers,
@@ -233,83 +229,6 @@ export function createCookieSessionAuth(opts: CookieSessionAuthOptions): AuthAda
   };
 }
 
-
-
-async function startServerBehindCredentialCorsProxy(opts: ServerOptions): Promise<AgentServerHandle> {
-  const upstreamPort = opts.port + 10;
-  const upstream = await startAgentServer({
-    port: upstreamPort,
-    mcpServers: opts.mcpServers,
-    adapter: createOpenAiAgentAdapter({
-      ...(opts.model !== undefined ? { model: opts.model } : {}),
-      ...(process.env.OPENAI_BASE_URL ? { baseURL: process.env.OPENAI_BASE_URL } : {}),
-    }),
-    ...(opts.auth !== undefined ? { auth: opts.auth } : {}),
-    ...(opts.sandboxProxyPort !== undefined ? { sandboxProxyPort: opts.sandboxProxyPort } : {}),
-    ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
-  });
-
-  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    void proxyCredentialedCorsRequest(req, res, upstreamPort);
-  });
-  await new Promise<void>((resolve) => server.listen(opts.port, resolve));
-  console.log(`[ainder-agent] credential CORS proxy ready: http://localhost:${opts.port} -> http://localhost:${upstreamPort}`);
-  return {
-    port: opts.port,
-    sandboxProxy: upstream.sandboxProxy,
-    async close() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await upstream.close();
-    },
-  };
-}
-
-async function proxyCredentialedCorsRequest(req: IncomingMessage, res: ServerResponse, upstreamPort: number): Promise<void> {
-  const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
-  const target = new URL(req.url ?? '/', `http://127.0.0.1:${upstreamPort}`);
-  const body = ['GET', 'HEAD'].includes(req.method ?? 'GET') ? undefined : req;
-  try {
-    const upstreamResponse = await fetch(target, {
-      method: req.method,
-      headers: req.headers as Record<string, string>,
-      // Node fetch requires this when proxying IncomingMessage bodies.
-      ...(body ? { body, duplex: 'half' as const } : {}),
-      redirect: 'manual',
-    });
-    res.statusCode = upstreamResponse.status;
-    res.statusMessage = upstreamResponse.statusText;
-    upstreamResponse.headers.forEach((value, key) => {
-      if (key.toLowerCase() !== 'access-control-allow-origin' && key.toLowerCase() !== 'access-control-allow-credentials') {
-        res.setHeader(key, value);
-      }
-    });
-    if (origin) {
-      applyCredentialCorsHeaders(req, res, origin);
-    }
-    const data = Buffer.from(await upstreamResponse.arrayBuffer());
-    res.end(data);
-  } catch (err) {
-    console.error('[ainder-agent] credential CORS proxy failed:', err);
-    res.statusCode = 502;
-    res.setHeader('Content-Type', 'application/json');
-    if (origin) {
-      applyCredentialCorsHeaders(req, res, origin);
-    }
-    res.end(JSON.stringify({ error: 'proxy_failed' }));
-  }
-}
-
-
-function applyCredentialCorsHeaders(req: IncomingMessage, res: ServerResponse, origin: string): void {
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  const requestedHeaders = typeof req.headers['access-control-request-headers'] === 'string'
-    ? req.headers['access-control-request-headers']
-    : 'Content-Type, Accept, Authorization, X-CSRF-Token';
-  res.setHeader('Access-Control-Allow-Headers', requestedHeaders);
-  res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
-}
 
 function loadSessions(storeFile: string | undefined): SessionRecord[] {
   if (!storeFile || !existsSync(storeFile)) return [];
