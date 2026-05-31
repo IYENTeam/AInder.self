@@ -1,0 +1,76 @@
+.ainder-agent {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100dvh;
+  min-width: 0;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  background: var(--ainder-charcoal);
+  color: #ffffff;
+}
+
+.ainder-agent-heading {
+  gap: 16px;
+  border-bottom: 1px solid color-mix(in srgb, #ffffff 14%, transparent);
+  padding: 16px;
+}
+
+.ainder-agent-heading h2 {
+  color: #ffffff;
+  font-size: 18px;
+}
+
+.ainder-agent-chat {
+  min-height: 0;
+}
+
+.ainder-agent-chat .layout {
+  height: 100%;
+}
+
+.ainder-agent-chat .chat {
+  background: #343434;
+}
+
+.ainder-agent-chat .ui-pane {
+  display: none;
+}
+
+.ainder-connection {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  background: #ffffff;
+  color: var(--ainder-charcoal, #424242);
+  padding: 24px;
+}
+
+.ainder-connection section {
+  max-width: 560px;
+  border: 1px solid var(--ainder-border, #42424233);
+  border-radius: 8px;
+  padding: 28px;
+}
+
+.ainder-connection code,
+.ainder-connection strong {
+  display: block;
+  margin-top: 14px;
+}
+
+@media (max-width: 1180px) {
+  .ainder-workspace,
+  .ainder-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ainder-product,
+  .ainder-agent {
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  .ainder-journey {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

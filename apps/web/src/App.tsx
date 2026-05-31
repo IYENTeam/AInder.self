@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react';
 import { ThemeProvider, getRawTheme } from '@ggui-ai/design/themes';
+import {
+  AinderConnectionState,
+  AinderWorkspace,
+} from './AinderWorkspace';
 import { Chat } from './Chat';
 
 /**
@@ -25,12 +29,7 @@ function resolveAgentEndpoint(): string {
 
 const AGENT_ENDPOINT = resolveAgentEndpoint();
 
-/**
- * Pair the chat shell with the SAME theme the iframe content uses
- * (canvas-demo's `ggui.json` sets `theme: indigo / dark`). `<ThemeProvider>`
- * expects the raw `DtcgTheme` token tree.
- */
-const INDIGO_DARK = getRawTheme('indigo', 'dark');
+const AINDER_THEME = getRawTheme('ggui', 'light');
 
 export function App() {
   // Sandbox-proxy URL read once from the agent backend's `GET /`
@@ -80,22 +79,22 @@ export function App() {
   }, []);
 
   return (
-    <ThemeProvider theme={INDIGO_DARK} mode="dark">
+    <ThemeProvider theme={AINDER_THEME} mode="light">
       {sandboxUrl !== null ? (
-        <Chat agentEndpoint={AGENT_ENDPOINT} sandboxUrl={sandboxUrl} />
+        <AinderWorkspace>
+          <Chat agentEndpoint={AGENT_ENDPOINT} sandboxUrl={sandboxUrl} />
+        </AinderWorkspace>
       ) : sandboxError !== null ? (
-        <div style={{ padding: 24, color: '#c00', fontFamily: 'system-ui' }}>
-          Failed to reach agent backend at <code>{AGENT_ENDPOINT}</code>:{' '}
-          <strong>{sandboxError}</strong>
-          <p style={{ marginTop: 12, fontSize: 13, color: '#666' }}>
-            Confirm <code>VITE_AGENT_ENDPOINT_URL</code> points at a running
-            MCP-Apps-spec backend (see <code>.env.example</code>).
-          </p>
-        </div>
+        <AinderConnectionState
+          agentEndpoint={AGENT_ENDPOINT}
+          detail={sandboxError}
+          status="error"
+        />
       ) : (
-        <div style={{ padding: 24, color: '#888', fontFamily: 'system-ui' }}>
-          Connecting to agent at <code>{AGENT_ENDPOINT}</code>…
-        </div>
+        <AinderConnectionState
+          agentEndpoint={AGENT_ENDPOINT}
+          status="connecting"
+        />
       )}
     </ThemeProvider>
   );
