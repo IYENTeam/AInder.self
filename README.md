@@ -61,17 +61,16 @@ pnpm install
 
 ### 2) 환경 변수 설정
 
-`.env.local`에 최소한 아래를 넣습니다.
+`.env.local`에 **지금 구현 기준 필수값**은 이것뿐입니다.
 
 ```bash
 OPENAI_API_KEY=your_key_here
 ```
 
-기본 MCP wiring은 이미 잡혀 있습니다.
-
-```bash
-GGUI_AINDER_MCP_URL=http://localhost:6782/mcp
-```
+추가 메모:
+- `GGUI_AINDER_MCP_URL`은 기본값이 이미 `.env.example`에 들어 있으므로 보통 그대로 두면 됩니다.
+- 현재 저장소의 Cocoun / tobl.ai 흐름은 **demo / seeded fallback 중심**이라 별도 `COCOUN_API_KEY`, `TOBL_API_KEY`를 아직 코드에서 필수로 읽지 않습니다.
+- 실제 외부 연동으로 바꿀 때는 그때 provider key를 추가하면 됩니다.
 
 ### 3) 개발 서버 실행
 
