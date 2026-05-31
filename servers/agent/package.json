@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc -b",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "test:security": "tsx --test src/server.test.ts"
   },
   "dependencies": {
     "@openai/agents": "^0.0.13",
