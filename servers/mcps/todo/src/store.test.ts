@@ -64,6 +64,49 @@ test('persistent store reloads sessions and provider call history', () => {
   }
 });
 
+test('legacy unwrapped persisted state migrates into the versioned envelope and keeps defaults', async () => {
+  const { writeFileSync, readFileSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'ainder-legacy-store-'));
+  const persistPath = join(dir, 'state.json');
+  try {
+    const legacyState = {
+      currentUserId: 'legacy-user',
+      builderOpenAiKeyConfigured: false,
+      cocounKeyConfigured: false,
+      retainRawUploads: false,
+      users: [],
+      uploads: [],
+      sanitizedConversations: [],
+      personaProfiles: [],
+      publicProfiles: [],
+      swipeInterests: [],
+      conversations: [],
+      matchRequests: [],
+      matches: [],
+      friendPersonas: [],
+      councilRuns: [],
+      reports: [],
+      consents: [],
+    };
+    writeFileSync(persistPath, JSON.stringify(legacyState, null, 2));
+
+    const reloaded = createAinderStore({ seedDemo: false, persistPath });
+    assert.deepEqual(reloaded.state().sessions, []);
+    assert.deepEqual(reloaded.state().auditEvents, []);
+    assert.deepEqual(reloaded.state().providerCalls, []);
+
+    reloaded.persist();
+    const persisted = JSON.parse(readFileSync(persistPath, 'utf8')) as {
+      schemaVersion?: number;
+      state?: unknown;
+    };
+    assert.equal(persisted.schemaVersion, 1);
+    assert.ok(persisted.state);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('match request preview excludes full transcript and report stays locked after one consent', () => {
   const store = createAinderStore({ seedDemo: true });
   const upload = store.uploadKakaoTxt({ fileName: 'sample.txt' });

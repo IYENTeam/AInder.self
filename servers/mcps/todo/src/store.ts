@@ -287,6 +287,13 @@ export interface AinderStoreOptions {
   readonly requirePersistence?: boolean;
 }
 
+const STORE_SCHEMA_VERSION = 1;
+
+interface PersistedStateEnvelope {
+  schemaVersion: number;
+  state: AinderState;
+}
+
 const DEFAULT_SAMPLE = `2026. 5. 20. 오후 8:01, 민지 : 오늘 회사 앞 강남역에서 봤잖아\n2026. 5. 20. 오후 8:02, 나 : 010-1234-5678로 전화하지 말고 카톡해줘\n2026. 5. 20. 오후 8:04, 민지 : 너는 왜 그렇게 느꼈는지 꼭 물어보더라\n2026. 5. 20. 오후 8:05, 나 : 결론보다 그때 기분이 어땠는지가 궁금해\n2026. 5. 20. 오후 8:06, 민지 : 급하게 정하는 건 부담스러워하는 편이지?\n2026. 5. 20. 오후 8:07, 나 : 응 천천히 알아가는 게 좋아`;
 
 function now(): string {
@@ -543,9 +550,28 @@ function createEmptyState(): AinderState {
   };
 }
 
+function normalizeState(state: AinderState): AinderState {
+  return {
+    ...state,
+    sessions: state.sessions ?? [],
+    auditEvents: state.auditEvents ?? [],
+    providerCalls: state.providerCalls ?? [],
+  };
+}
+
 function loadState(path: string): AinderState | null {
   if (!existsSync(path)) return null;
-  return JSON.parse(readFileSync(path, 'utf8')) as AinderState;
+  const parsed = JSON.parse(readFileSync(path, 'utf8')) as AinderState | PersistedStateEnvelope;
+  if (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    'schemaVersion' in parsed &&
+    'state' in parsed &&
+    typeof (parsed as PersistedStateEnvelope).schemaVersion === 'number'
+  ) {
+    return normalizeState((parsed as PersistedStateEnvelope).state);
+  }
+  return normalizeState(parsed as AinderState);
 }
 
 export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderStore {
@@ -559,7 +585,11 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
   const persist = (): void => {
     if (opts.persistPath === undefined) return;
     mkdirSync(dirname(opts.persistPath), { recursive: true });
-    writeFileSync(opts.persistPath, `${JSON.stringify(state, null, 2)}\n`);
+    const envelope: PersistedStateEnvelope = {
+      schemaVersion: STORE_SCHEMA_VERSION,
+      state,
+    };
+    writeFileSync(opts.persistPath, `${JSON.stringify(envelope, null, 2)}\n`);
   };
 
   const audit = (type: AuditEventType, subjectId: string | null = null, userId: string | null = state.currentUserId || null): AuditEvent => {
