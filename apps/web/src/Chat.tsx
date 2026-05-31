@@ -534,7 +534,6 @@ function ResourceFrame({
           method: 'POST',
           credentials: 'include',
           headers,
-          credentials: 'include',
           body: JSON.stringify({
             kind: 'tool-call',
             name: params.name,

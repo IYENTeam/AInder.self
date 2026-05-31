@@ -13,6 +13,8 @@ const requiredProduction = [
   'AINDER_SESSION_SECRET',
   'AINDER_ADMIN_TOKEN',
   'AINDER_STORE_PATH',
+  'AINDER_BOOTSTRAP_USER',
+  'AINDER_BOOTSTRAP_PASSWORD_HASH',
 ];
 
 const requiredProviderLabels = ['COCOUN_API_KEY', 'TOBL_API_KEY'];

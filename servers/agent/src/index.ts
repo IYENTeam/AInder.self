@@ -1,40 +1,16 @@
 /* eslint-disable no-console */
-/**
- * Boot entry point — wires environment variables to the HTTP server.
- *
- * Env vars consumed here:
- *
- *   PORT                Chat backend HTTP port (default 6790)
- *   SANDBOX_PROXY_PORT  Spec-mandated second-origin sandbox port (default 7791)
- *   GGUI_MCP_URL        Primary ggui MCP endpoint. Required in production;
- *                       defaults to http://localhost:6781/mcp only in dev.
- *   GGUI_AINDER_MCP_URL Optional second MCP for AInder domain tools.
- *                       Omitted by default — the agent runs ggui-only.
- *   OPENAI_MODEL        Override the default OpenAI model
- *                       (default `gpt-5.5` — see agent.ts)
- *   SYSTEM_PROMPT       Override the default ggui-agent system prompt.
- *                       Set to `none` to disable entirely.
- *   OPENAI_API_KEY      Required. The agent fails-fast AT BOOT if absent
- *                       (checked below + in agent.ts).
- *
- * Adding another MCP server: one entry below + one env var.
- *
- * Auto-loads `.env.local` walking up from this file, so a workspace-
- * root `.env.local` is picked up without explicit sourcing. External
- * devs cloning the sample drop their `.env.local` next to package.json
- * and it's found the same way.
- */
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomBytes, scryptSync } from 'node:crypto';
 import { config as loadDotenv } from 'dotenv';
-import type { AuthAdapter, McpServerConfig } from '@ggui-ai/agent-server';
+import type { McpServerConfig } from '@ggui-ai/agent-server';
 import { AINDER_SYSTEM_PROMPT } from './ainder-system-prompt.js';
 import { createCookieSessionAuth, startServer } from './server.js';
 
 function findEnvLocal(start: string): string | null {
   let dir = start;
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 10; i += 1) {
     const candidate = join(dir, '.env.local');
     if (existsSync(candidate)) return candidate;
     const parent = dirname(dir);
@@ -42,6 +18,13 @@ function findEnvLocal(start: string): string | null {
     dir = parent;
   }
   return null;
+}
+
+const here = dirname(fileURLToPath(import.meta.url));
+const envPath = findEnvLocal(here);
+if (envPath) {
+  loadDotenv({ path: envPath });
+  console.log(`[ainder-agent] loaded ${envPath}`);
 }
 
 const isProduction = process.env.NODE_ENV === 'production';
@@ -63,23 +46,38 @@ function optionalDevDefault(name: string, fallback: string): string {
   process.exit(1);
 }
 
-const here = dirname(fileURLToPath(import.meta.url));
-const envPath = findEnvLocal(here);
-if (envPath) {
-  loadDotenv({ path: envPath });
-  console.log(`[ainder-agent] loaded ${envPath}`);
+function parseCsv(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
-// Fail loud + early when the provider key is missing. The agent loop AND
-// ggui's UI generation both need it; without it the agent would otherwise
-// crash mid-request with a buried error. (The `pnpm dev` orchestrator runs
-// the same check before booting — this also covers running the agent
-// standalone or in a deploy.)
+function isLocalhostUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function assertNotLocalhost(name: string, value: string): void {
+  if (isLocalhostUrl(value)) {
+    console.error(`[ainder-agent] ${name} must not point at localhost in production.`);
+    process.exit(1);
+  }
+}
+
+function hashBootstrapPassword(password: string): string {
+  const salt = 'bootstrap-dev-salt';
+  const derived = scryptSync(password, salt, 64).toString('base64url');
+  return `scrypt:v1:${salt}:${derived}`;
+}
+
 if (!process.env.OPENAI_API_KEY?.trim()) {
   console.error(
-    '\n[ainder-agent] OPENAI_API_KEY is not set — the agent loop and ' +
-      "ggui's UI generation both require it.\n" +
-      '  Add it to .env.local (copy .env.example), then restart.\n',
+    '\n[ainder-agent] OPENAI_API_KEY is not set — the agent loop and ggui UI generation both require it.\n',
   );
   process.exit(1);
 }
@@ -88,14 +86,12 @@ if (isProduction) {
   requireEnv('AINDER_ALLOWED_ORIGINS');
   requireEnv('VITE_AGENT_ENDPOINT_URL');
   requireEnv('AINDER_SESSION_SECRET');
+  requireEnv('AINDER_BOOTSTRAP_USER');
+  requireEnv('AINDER_BOOTSTRAP_PASSWORD_HASH');
 }
 
 const PORT = Number(process.env.PORT ?? 6790);
-const SANDBOX_PROXY_PORT = process.env.SANDBOX_PROXY_PORT
-  ? Number(process.env.SANDBOX_PROXY_PORT)
-  : IS_PRODUCTION
-    ? undefined
-    : 7791;
+const SANDBOX_PROXY_PORT = process.env.SANDBOX_PROXY_PORT ? Number(process.env.SANDBOX_PROXY_PORT) : 7791;
 const MODEL = process.env.OPENAI_MODEL;
 const SYSTEM_PROMPT_ENV = process.env.SYSTEM_PROMPT;
 const systemPrompt =
@@ -105,36 +101,45 @@ const systemPrompt =
       ? SYSTEM_PROMPT_ENV
       : AINDER_SYSTEM_PROMPT;
 
-// MCP servers the agent can call into. Production requires explicit endpoints;
-// local development keeps the documented localhost convenience default.
-const gguiMcpUrl = process.env.GGUI_MCP_URL ?? (IS_PRODUCTION ? '' : 'http://localhost:6781/mcp');
-if (!gguiMcpUrl) {
-  console.error('\n[ainder-agent] GGUI_MCP_URL is required in production.\n');
-  process.exit(1);
-}
-if (IS_PRODUCTION) assertNotLocalhost('GGUI_MCP_URL', gguiMcpUrl);
+const allowedOrigins = new Set(parseCsv(process.env.AINDER_ALLOWED_ORIGINS));
+const gguiMcpUrl = optionalDevDefault('GGUI_MCP_URL', 'http://localhost:6781/mcp');
+if (isProduction) assertNotLocalhost('GGUI_MCP_URL', gguiMcpUrl);
 
 const mcpServers: Record<string, McpServerConfig> = {
-  ggui: { url: optionalDevDefault('GGUI_MCP_URL', 'http://localhost:6781/mcp') },
+  ggui: { url: gguiMcpUrl },
+  ainder: { url: optionalDevDefault('GGUI_AINDER_MCP_URL', 'http://localhost:6782/mcp') },
 };
-for (const [key, url] of Object.entries(process.env)) {
+for (const [key, rawUrl] of Object.entries(process.env)) {
   const match = /^GGUI_(.+)_MCP_URL$/.exec(key);
-  if (match && url) {
-    mcpServers[match[1].toLowerCase()] = {
-      url: requireUrl(key, null),
-    };
-  }
+  if (!match || !rawUrl) continue;
+  const name = match[1].toLowerCase();
+  if (name === 'mcp') continue;
+  if (isProduction) assertNotLocalhost(key, rawUrl);
+  mcpServers[name] = { url: rawUrl };
 }
+
+const bootstrapUser = process.env.AINDER_BOOTSTRAP_USER?.trim() || 'demo';
+const bootstrapPasswordHash =
+  process.env.AINDER_BOOTSTRAP_PASSWORD_HASH?.trim() ||
+  hashBootstrapPassword(process.env.AINDER_BOOTSTRAP_PASSWORD?.trim() || 'demo');
+const sessionSecret = process.env.AINDER_SESSION_SECRET?.trim() || randomBytes(32).toString('base64url');
+const sessionStoreFile = process.env.AINDER_SESSION_STORE_PATH?.trim();
 
 startServer({
   port: PORT,
   sandboxProxyPort: SANDBOX_PROXY_PORT,
   mcpServers,
-  allowedOrigins: ALLOWED_ORIGINS,
-  sessionSecret: process.env.AINDER_SESSION_SECRET,
+  auth: createCookieSessionAuth({
+    sessionSecret,
+    userId: bootstrapUser,
+    passwordHash: bootstrapPasswordHash,
+    storeFile: sessionStoreFile,
+    secureCookies: isProduction,
+    allowedOrigins,
+  }),
   ...(MODEL ? { model: MODEL } : {}),
   ...(systemPrompt !== undefined ? { systemPrompt } : {}),
 }).catch((err: unknown) => {
   console.error('[ainder-agent] failed to start:', err);
   process.exit(1);
-}
+});

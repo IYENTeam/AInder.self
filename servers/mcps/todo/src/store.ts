@@ -11,8 +11,12 @@ export type AuditEventType =
   | 'upload.created'
   | 'upload.sanitized'
   | 'upload.deleted'
+  | 'upload.raw_deleted'
+  | 'upload.raw_retained'
   | 'provider.egress_blocked'
+  | 'provider.egress_allowed'
   | 'provider.call'
+  | 'consent.recorded'
   | 'match.requested'
   | 'report.reveal_consent'
   | 'tool.invoked';
@@ -176,29 +180,8 @@ export interface ConsentRecord {
 export interface AuditEvent {
   id: string;
   requestId: string | null;
-  actorUserId: string | null;
-  eventType:
-    | 'auth.signup'
-    | 'auth.login_success'
-    | 'auth.login_failure'
-    | 'upload.created'
-    | 'upload.raw_deleted'
-    | 'upload.raw_retained'
-    | 'provider.egress_blocked'
-    | 'provider.egress_allowed'
-    | 'consent.recorded'
-    | 'report.reveal_requested';
-  subjectId: string | null;
-  createdAt: string;
-}
-
-
-export interface AuthAuditEvent {
-  id: string;
-  requestId: string | null;
-  userId: string;
-  action: 'login' | 'logout' | 'upload' | 'rawRetention' | 'providerEgress' | 'reportReveal';
-  status: 'success' | 'failure' | 'blocked';
+  type: AuditEventType;
+  userId: string | null;
   subjectId: string | null;
   createdAt: string;
 }
@@ -213,30 +196,12 @@ export interface ProviderCallRecord {
   createdAt: string;
 }
 
-export interface AuditEvent {
-  id: string;
-  action: string;
-  actorUserId: string | null;
-  subjectId: string | null;
-  requestId: string | null;
-  createdAt: string;
-}
-
 export interface SessionRecord {
   id: string;
   userId: string;
   createdAt: string;
   expiresAt: string;
   revokedAt: string | null;
-}
-
-export interface AuditEvent {
-  id: string;
-  requestId: string | null;
-  type: AuditEventType;
-  userId: string | null;
-  subjectId: string | null;
-  createdAt: string;
 }
 
 export interface AinderState {
@@ -390,22 +355,74 @@ function assertExternalCallAllowed(
     (u) => u.userId === userId && u.rawDeletionStatus === 'pending',
   );
   if (pending) {
-    state.auditEvents.push({
-      id: `audit-${randomUUID()}`,
+    createAuditEvent(state, counters, {
       requestId: null,
       type: 'provider.egress_blocked',
       userId,
       subjectId: null,
-      createdAt: now(),
     });
     throw new Error('External calls are blocked until raw deletion or retention decision is complete.');
   }
   createAuditEvent(state, counters, {
     requestId: null,
-    actorUserId: userId,
-    eventType: 'provider.egress_allowed',
+    type: 'provider.egress_allowed',
+    userId,
     subjectId: userId,
   });
+}
+
+function primeCounters(state: AinderState, counters: Map<string, number>): void {
+  const ids = [
+    ...state.users.map((row) => row.id),
+    ...state.uploads.map((row) => row.id),
+    ...state.sanitizedConversations.map((row) => row.id),
+    ...state.personaProfiles.map((row) => row.id),
+    ...state.publicProfiles.map((row) => row.id),
+    ...state.swipeInterests.map((row) => row.id),
+    ...state.conversations.map((row) => row.id),
+    ...state.matchRequests.map((row) => row.id),
+    ...state.matches.map((row) => row.id),
+    ...state.friendPersonas.map((row) => row.id),
+    ...state.councilRuns.map((row) => row.id),
+    ...state.reports.map((row) => row.id),
+    ...state.consents.map((row) => row.id),
+    ...state.sessions.map((row) => row.id),
+    ...state.auditEvents.map((row) => row.id),
+  ];
+  for (const id of ids) {
+    const match = /^([a-z-]+)-(\d+)$/.exec(id);
+    if (!match) continue;
+    const prefix = match[1]!;
+    const value = Number.parseInt(match[2]!, 10);
+    if (!Number.isFinite(value)) continue;
+    counters.set(prefix, Math.max(counters.get(prefix) ?? 0, value));
+  }
+}
+
+function recordProviderCall(
+  state: AinderState,
+  counters: Map<string, number>,
+  provider: ProviderCallRecord['provider'],
+  purpose: string,
+  status: ProviderStatus,
+  userId: string | null,
+): ProviderCallRecord {
+  const record: ProviderCallRecord = {
+    id: nextId('provider-call', counters),
+    requestId: null,
+    provider,
+    purpose,
+    status,
+    correlationId: randomUUID(),
+    createdAt: now(),
+  };
+  createAuditEvent(state, counters, {
+    requestId: null,
+    type: status === 'providerFailure' ? 'provider.egress_blocked' : 'provider.egress_allowed',
+    userId,
+    subjectId: record.id,
+  });
+  return record;
 }
 
 function createSeedState(): AinderState {
@@ -573,7 +590,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
     uploads: state.uploads.map((upload) => ({ ...upload, rawText: null })),
   });
 
-  return {
+  const api: AinderStore = {
     state: redactedState,
     reset() {
       state = opts.seedDemo ? createSeedState() : createEmptyState();
@@ -644,8 +661,8 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
       });
       createAuditEvent(state, counters, {
         requestId: null,
-        actorUserId: state.currentUserId || null,
-        eventType: 'consent.recorded',
+        type: 'consent.recorded',
+        userId: state.currentUserId || null,
         subjectId: state.currentUserId || null,
       });
       return { retainRawUploads };
@@ -704,8 +721,8 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         });
           createAuditEvent(state, counters, {
             requestId: null,
-            actorUserId: upload.userId,
-            eventType: 'upload.raw_retained',
+            type: 'upload.raw_retained',
+            userId: upload.userId,
             subjectId: upload.id,
           });
       } else {
@@ -713,8 +730,8 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         upload.rawDeletionStatus = 'deleted';
         createAuditEvent(state, counters, {
           requestId: null,
-          actorUserId: upload.userId,
-          eventType: 'upload.raw_deleted',
+          type: 'upload.raw_deleted',
+          userId: upload.userId,
           subjectId: upload.id,
         });
       }
@@ -786,7 +803,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         publishedAt: null,
       };
       state.personaProfiles.push(profile);
-      recordProviderCall('openai', 'persona_profile_generation', 'providerSuccess');
+      recordProviderCall(state, counters, 'openai', 'persona_profile_generation', 'providerSuccess', sanitized.userId);
       return profile;
     },
     getPersonaReviewState(profileId) {
@@ -928,7 +945,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         providerStatus: 'seededFallback',
       };
       state.conversations.push(conversation);
-      recordProviderCall('openai', 'direct_persona_chat', conversation.providerStatus);
+      recordProviderCall(state, counters, 'openai', 'direct_persona_chat', conversation.providerStatus, conversation.requesterId);
       return conversation;
     },
     sendDirectPersonaMessage(conversationId, message) {
@@ -991,7 +1008,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
       conversation.watchouts = ['빠른 약속 제안은 부담일 수 있음', '농담 강도는 천천히 맞추는 편이 안전함'];
       conversation.firstMessageSuggestions = ['처음 친해질 때 편한 대화 속도는 어떤 편이에요?', '요즘 오래 이야기해도 지치지 않는 주제가 있어요?'];
       conversation.providerStatus = 'providerSuccess';
-      recordProviderCall('tobl', 'persona_simulation', conversation.providerStatus);
+      recordProviderCall(state, counters, 'tobl', 'persona_simulation', conversation.providerStatus, conversation.requesterId);
       return conversation;
     },
     continuePersonaExploration(conversationId, additionalTurnCount) {
@@ -1117,7 +1134,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
         }),
       };
       state.councilRuns.push(run);
-      recordProviderCall('cocoun', 'friend_persona_council', run.providerStatus);
+      recordProviderCall(state, counters, 'cocoun', 'friend_persona_council', run.providerStatus, state.currentUserId || null);
       report.councilRunId = run.id;
       return run;
     },
@@ -1219,25 +1236,5 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
     'consentReportReveal',
   ]);
 
-  return new Proxy(api, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver);
-      if (typeof value !== 'function' || !writeMethods.has(prop as keyof AinderStore)) {
-        return value;
-      }
-      return (...args: unknown[]) => {
-        const result = value.apply(target, args);
-        state.auditEvents.push({
-          id: nextId('audit', counters),
-          action: String(prop),
-          actorUserId: state.currentUserId || null,
-          subjectId: typeof args[0] === 'string' ? args[0] : null,
-          requestId: null,
-          createdAt: now(),
-        });
-        if (persistencePath !== null) persistState(persistencePath, state);
-        return result;
-      };
-    },
-  });
+  return api;
 }

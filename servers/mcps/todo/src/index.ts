@@ -176,7 +176,7 @@ async function handleRequest(
   }
 
   if (req.method === 'POST' && url.pathname === '/mcp') {
-    const body = await readBody(req, MAX_BODY_BYTES);
+    const body = await readBody(req, maxBodyBytes);
     let parsed: unknown;
     try {
       parsed = JSON.parse(body);

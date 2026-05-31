@@ -19,6 +19,7 @@ dist-ui/
 # ggui serve runtime state (sessions, render secrets, vector index)
 .ggui/
 .gjc/state/
+.gjc/reports/
 
 # Test / coverage
 /coverage
