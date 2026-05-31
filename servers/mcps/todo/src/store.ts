@@ -224,6 +224,7 @@ export interface AinderState {
   consents: ConsentRecord[];
   sessions: SessionRecord[];
   auditEvents: AuditEvent[];
+  providerCalls: ProviderCallRecord[];
 }
 
 export interface AinderStore {
@@ -416,9 +417,10 @@ function recordProviderCall(
     correlationId: randomUUID(),
     createdAt: now(),
   };
+  state.providerCalls.push(record);
   createAuditEvent(state, counters, {
     requestId: null,
-    type: status === 'providerFailure' ? 'provider.egress_blocked' : 'provider.egress_allowed',
+    type: status === 'providerFailure' ? 'provider.egress_blocked' : 'provider.call',
     userId,
     subjectId: record.id,
   });
@@ -512,6 +514,7 @@ function createSeedState(): AinderState {
     consents: [],
     sessions: [],
     auditEvents: [],
+    providerCalls: [],
   };
 }
 
@@ -536,6 +539,7 @@ function createEmptyState(): AinderState {
     consents: [],
     sessions: [],
     auditEvents: [],
+    providerCalls: [],
   };
 }
 
@@ -548,6 +552,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
   let state = opts.persistPath !== undefined ? loadState(opts.persistPath) ?? (opts.seedDemo ? createSeedState() : createEmptyState()) : opts.seedDemo === false ? createEmptyState() : createSeedState();
   state.sessions ??= [];
   state.auditEvents ??= [];
+  state.providerCalls ??= [];
   const counters = new Map<string, number>();
   primeCounters(state, counters);
 
@@ -596,6 +601,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
       state = opts.seedDemo ? createSeedState() : createEmptyState();
       state.sessions ??= [];
       state.auditEvents ??= [];
+      state.providerCalls ??= [];
       counters.clear();
       persist();
     },

@@ -44,6 +44,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Run hardening regression tests
+        run: pnpm test:hardening
+
       - name: Validate production env contract
         run: pnpm env:validate:production
 

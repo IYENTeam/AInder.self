@@ -11,7 +11,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc -b",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "test:hardening": "tsx --test src/store.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.0",
