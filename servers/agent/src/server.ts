@@ -335,7 +335,7 @@ function serializeSessionCookie(rawSessionId: string, secure: boolean): string {
     'HttpOnly',
     'SameSite=None',
     `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
-    secure ? 'Secure' : '',
+    'Secure',
   ]
     .filter(Boolean)
     .join('; ');
@@ -348,7 +348,7 @@ function expireSessionCookie(secure: boolean): string {
     'HttpOnly',
     'SameSite=None',
     'Max-Age=0',
-    secure ? 'Secure' : '',
+    'Secure',
   ]
     .filter(Boolean)
     .join('; ');
