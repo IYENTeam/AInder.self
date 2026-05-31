@@ -71,10 +71,10 @@ jobs:
           VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL || 'https://api-ainder.iyen.io' }}
 
       - name: Deploy Cloudflare Worker
-        run: pnpm wrangler deploy
+        run: npx wrangler@4.79.0 deploy
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           # Prefer scoped API token; falls back to legacy Global API Key + email if set.
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_GLOBAL_API_KEY }}
           CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
