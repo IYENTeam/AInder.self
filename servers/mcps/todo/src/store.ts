@@ -1,3 +1,6 @@
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 export type Visibility = 'public' | 'private' | 'hidden';
 export type PersonaConversationMode = 'direct' | 'simulation';
 export type ProviderStatus = 'notStarted' | 'providerSuccess' | 'providerFailure' | 'cachedDemo' | 'seededFallback';
@@ -159,6 +162,26 @@ export interface ConsentRecord {
   createdAt: string;
 }
 
+export interface AuthAuditEvent {
+  id: string;
+  requestId: string | null;
+  userId: string;
+  action: 'login' | 'logout' | 'upload' | 'rawRetention' | 'providerEgress' | 'reportReveal';
+  status: 'success' | 'failure' | 'blocked';
+  subjectId: string | null;
+  createdAt: string;
+}
+
+export interface ProviderCallRecord {
+  id: string;
+  requestId: string | null;
+  provider: 'openai' | 'cocoun' | 'tobl';
+  purpose: string;
+  status: ProviderStatus;
+  correlationId: string;
+  createdAt: string;
+}
+
 export interface AinderState {
   currentUserId: string;
   builderOpenAiKeyConfigured: boolean;
@@ -177,10 +200,13 @@ export interface AinderState {
   councilRuns: CocounCouncilRun[];
   reports: MatchReport[];
   consents: ConsentRecord[];
+  auditEvents: AuthAuditEvent[];
+  providerCalls: ProviderCallRecord[];
 }
 
 export interface AinderStore {
   state(): AinderState;
+  persist(): void;
   reset(): void;
   createUser(userId: string, password: string): User;
   login(userId: string, password: string): User | null;
@@ -232,7 +258,32 @@ function now(): string {
 }
 
 function hashPassword(password: string): string {
-  return `demo-hash:${Buffer.from(password).toString('base64')}`;
+  const salt = randomBytes(16).toString('hex');
+  const hash = scryptSync(password, salt, 64).toString('hex');
+  return `scrypt:${salt}:${hash}`;
+}
+
+function verifyPassword(password: string, encoded: string): boolean {
+  if (encoded.startsWith('scrypt:')) {
+    const [, salt, expected] = encoded.split(':');
+    if (!salt || !expected) return false;
+    const actual = scryptSync(password, salt, 64).toString('hex');
+    return constantTimeEqual(actual, expected);
+  }
+
+  // Legacy demo hashes are accepted only to let old local data migrate on
+  // login; new users and seeded dev users are always written with scrypt.
+  if (encoded.startsWith('demo-hash:')) {
+    return encoded === `demo-hash:${Buffer.from(password).toString('base64')}`;
+  }
+
+  return false;
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 function nextId(prefix: string, counters: Map<string, number>): string {
@@ -353,12 +404,93 @@ function createSeedState(): AinderState {
     councilRuns: [],
     reports: [],
     consents: [],
+    auditEvents: [],
+    providerCalls: [],
   };
 }
 
-export function createAinderStore(): AinderStore {
-  let state = createSeedState();
+export interface AinderStoreOptions {
+  readonly dataFile?: string;
+  readonly allowSeedData?: boolean;
+}
+
+function createEmptyState(): AinderState {
+  return {
+    ...createSeedState(),
+    currentUserId: '',
+    builderOpenAiKeyConfigured: false,
+    cocounKeyConfigured: false,
+    users: [],
+    uploads: [],
+    sanitizedConversations: [],
+    personaProfiles: [],
+    publicProfiles: [],
+    swipeInterests: [],
+    conversations: [],
+    matchRequests: [],
+    matches: [],
+    friendPersonas: [],
+    councilRuns: [],
+    reports: [],
+    consents: [],
+    auditEvents: [],
+    providerCalls: [],
+  };
+}
+
+function loadState(opts: AinderStoreOptions): AinderState {
+  if (opts.dataFile && existsSync(opts.dataFile)) {
+    const parsed = JSON.parse(readFileSync(opts.dataFile, 'utf8')) as AinderState;
+    return {
+      ...parsed,
+      auditEvents: parsed.auditEvents ?? [],
+      providerCalls: parsed.providerCalls ?? [],
+    };
+  }
+  return opts.allowSeedData === false ? createEmptyState() : createSeedState();
+}
+
+function persistState(state: AinderState, dataFile: string | undefined): void {
+  if (!dataFile) return;
+  mkdirSync(dirname(dataFile), { recursive: true });
+  writeFileSync(dataFile, JSON.stringify(state, null, 2));
+}
+
+export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
+  let state = loadState(opts);
   const counters = new Map<string, number>();
+  const persist = () => persistState(state, opts.dataFile);
+  const audit = (
+    action: AuthAuditEvent['action'],
+    status: AuthAuditEvent['status'],
+    subjectId: string | null = null,
+    userId = state.currentUserId,
+  ) => {
+    state.auditEvents.push({
+      id: nextId('audit', counters),
+      requestId: null,
+      userId,
+      action,
+      status,
+      subjectId,
+      createdAt: now(),
+    });
+  };
+  const recordProviderCall = (
+    provider: ProviderCallRecord['provider'],
+    purpose: string,
+    status: ProviderStatus,
+  ) => {
+    state.providerCalls.push({
+      id: nextId('provider-call', counters),
+      requestId: null,
+      provider,
+      purpose,
+      status,
+      correlationId: randomBytes(12).toString('hex'),
+      createdAt: now(),
+    });
+  };
 
   const currentUser = (): User => {
     const user = state.users.find((u) => u.id === state.currentUserId);
@@ -376,9 +508,11 @@ export function createAinderStore(): AinderStore {
 
   return {
     state: () => state,
+    persist,
     reset() {
-      state = createSeedState();
+      state = opts.allowSeedData === false ? createEmptyState() : createSeedState();
       counters.clear();
+      persist();
     },
     createUser(userId, password) {
       if (state.users.some((u) => u.userId === userId)) throw new Error('User already exists.');
@@ -395,9 +529,17 @@ export function createAinderStore(): AinderStore {
       return user;
     },
     login(userId, password) {
-      const user = state.users.find((u) => u.userId === userId && u.passwordHash === hashPassword(password));
-      if (user) state.currentUserId = user.id;
-      return user ?? null;
+      const user = state.users.find((u) => u.userId === userId);
+      if (!user || !verifyPassword(password, user.passwordHash)) {
+        audit('login', 'failure', null, user?.id ?? userId);
+        return null;
+      }
+      if (user.passwordHash.startsWith('demo-hash:')) {
+        user.passwordHash = hashPassword(password);
+      }
+      state.currentUserId = user.id;
+      audit('login', 'success', null, user.id);
+      return user;
     },
     currentUser,
     configureBuilderOpenAiKey() {
@@ -420,6 +562,7 @@ export function createAinderStore(): AinderStore {
         visiblePayloadSummary: `Raw upload retention: ${retainRawUploads}`,
         createdAt: now(),
       });
+      audit('rawRetention', 'success', state.currentUserId);
       return { retainRawUploads };
     },
     conversationSourceState(userId = state.currentUserId) {
@@ -445,6 +588,7 @@ export function createAinderStore(): AinderStore {
         createdAt: now(),
       };
       state.uploads.push(upload);
+      audit('upload', 'success', upload.id, upload.userId);
       return upload;
     },
     sanitizeConversation(uploadId) {
@@ -539,6 +683,7 @@ export function createAinderStore(): AinderStore {
         publishedAt: null,
       };
       state.personaProfiles.push(profile);
+      recordProviderCall('openai', 'persona_profile_generation', 'providerSuccess');
       return profile;
     },
     getPersonaReviewState(profileId) {
@@ -680,6 +825,7 @@ export function createAinderStore(): AinderStore {
         providerStatus: 'seededFallback',
       };
       state.conversations.push(conversation);
+      recordProviderCall('openai', 'direct_persona_chat', conversation.providerStatus);
       return conversation;
     },
     sendDirectPersonaMessage(conversationId, message) {
@@ -742,6 +888,7 @@ export function createAinderStore(): AinderStore {
       conversation.watchouts = ['빠른 약속 제안은 부담일 수 있음', '농담 강도는 천천히 맞추는 편이 안전함'];
       conversation.firstMessageSuggestions = ['처음 친해질 때 편한 대화 속도는 어떤 편이에요?', '요즘 오래 이야기해도 지치지 않는 주제가 있어요?'];
       conversation.providerStatus = 'providerSuccess';
+      recordProviderCall('tobl', 'persona_simulation', conversation.providerStatus);
       return conversation;
     },
     continuePersonaExploration(conversationId, additionalTurnCount) {
@@ -866,6 +1013,7 @@ export function createAinderStore(): AinderStore {
         }),
       };
       state.councilRuns.push(run);
+      recordProviderCall('cocoun', 'friend_persona_council', run.providerStatus);
       report.councilRunId = run.id;
       return run;
     },
@@ -909,6 +1057,7 @@ export function createAinderStore(): AinderStore {
         visiblePayloadSummary: 'Match report reveal consent',
         createdAt: now(),
       });
+      audit('reportReveal', consent ? 'success' : 'blocked', report.id);
       const conversation = state.conversations.find((c) => c.id === report.conversationId);
       const other = conversation?.targetUserId;
       if (consent && other) report.revealConsents[other] = report.revealConsents[other] ?? false;
