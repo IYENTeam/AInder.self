@@ -57,11 +57,59 @@ interface ChatProps {
   readonly sandboxUrl: string;
 }
 
-// localStorage keys for the guest-token flow. The token survives
-// reloads so a returning visitor lands on the same chats; the chatId
-// is URL-resident so cross-tab links land on the same conversation.
-const LS_GUEST_TOKEN = 'ggui-basic-web/guestToken';
+// Development-only guest-token flow. Production uses the agent backend's
+// secure, server-side cookie session and never stores bearer credentials in
+// localStorage.
+const LS_DEV_GUEST_TOKEN = 'ainder-dev/guestToken';
 const URL_CHAT_PARAM = 'chat';
+
+type AuthState = 'checking' | 'authenticated' | 'unauthenticated';
+
+function devGuestAuthEnabled(): boolean {
+  return !import.meta.env.PROD;
+}
+
+/**
+ * Mint a fresh development guest token via the agent backend's
+ * `POST /auth/guest` mount. This path is intentionally unreachable from
+ * production bundles.
+ */
+async function mintDevGuestToken(agentEndpoint: string): Promise<string> {
+  const res = await fetch(`${agentEndpoint}/auth/guest`, { method: 'POST' });
+  if (!res.ok) {
+    throw new Error(`POST /auth/guest returned ${res.status}`);
+  }
+  const body = (await res.json()) as { guestToken?: unknown };
+  if (typeof body.guestToken !== 'string' || body.guestToken.length === 0) {
+    throw new Error('POST /auth/guest response missing guestToken');
+  }
+  return body.guestToken;
+}
+
+async function hasCookieSession(agentEndpoint: string): Promise<boolean> {
+  const res = await fetch(`${agentEndpoint}/auth/me`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  });
+  return res.ok;
+}
+
+async function loginWithCookieSession(
+  agentEndpoint: string,
+  userId: string,
+  password: string,
+): Promise<void> {
+  const res = await fetch(`${agentEndpoint}/auth/login`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ userId, password }),
+  });
+  if (!res.ok) {
+    throw new Error(`login failed (${res.status})`);
+  }
+}
 
 /**
  * Read the URL `?chat=<id>` — returns the chatId when present so the
@@ -75,64 +123,57 @@ function getInitialChatId(): string | undefined {
   );
   return fromUrl && fromUrl.length > 0 ? fromUrl : undefined;
 }
-
-/**
- * Mint a fresh guest token via the agent backend's
- * `POST /auth/guest` mount (the spec-canonical endpoint mounted by
- * `@ggui-ai/agent-server`'s default `createGuestTokenAuth()`).
- */
-async function mintGuestToken(agentEndpoint: string): Promise<string> {
-  const res = await fetch(`${agentEndpoint}/auth/guest`, { method: 'POST' });
-  if (!res.ok) {
-    throw new Error(`POST /auth/guest returned ${res.status}`);
-  }
-  const body = (await res.json()) as { guestToken?: unknown };
-  if (typeof body.guestToken !== 'string' || body.guestToken.length === 0) {
-    throw new Error('POST /auth/guest response missing guestToken');
-  }
-  return body.guestToken;
-}
-
 /**
  * Chat panel + iframe area for an MCP-Apps-spec agent backend.
  *
- * Auth: bearer guest token resolved at mount (or cached in
- * localStorage). The token is the principal id the backend gates
- * chat-ownership on; clearing localStorage = fresh guest = new
- * conversations.
+ * Auth: production uses secure cookie + server-side session auth. The legacy
+ * bearer guest token remains available only in local development so demos and
+ * e2e harnesses can run without a provisioned auth backend.
  */
 export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
-  // Bearer token (kept in a ref so the per-fetch `getAuthToken`
-  // callback always sees the latest). null = not yet minted.
-  const guestTokenRef = useRef<string | null>(null);
-  const [guestTokenReady, setGuestTokenReady] = useState(false);
+  const devGuestTokenRef = useRef<string | null>(null);
+  const [authState, setAuthState] = useState<AuthState>('checking');
+  const [loginUserId, setLoginUserId] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState<string | null>(null);
 
-  // Boot: pull cached token from localStorage; mint a fresh one if
-  // absent. Async; the chat panel guards against premature renders
-  // via `guestTokenReady`.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      setAuthState('checking');
+      setLoginError(null);
       try {
-        const cached =
-          typeof window !== 'undefined'
-            ? window.localStorage.getItem(LS_GUEST_TOKEN)
-            : null;
-        if (cached && cached.length > 0) {
-          guestTokenRef.current = cached;
-          if (!cancelled) setGuestTokenReady(true);
+        if (await hasCookieSession(agentEndpoint)) {
+          devGuestTokenRef.current = null;
+          if (!cancelled) setAuthState('authenticated');
           return;
         }
-        const fresh = await mintGuestToken(agentEndpoint);
+
+        if (!devGuestAuthEnabled()) {
+          if (!cancelled) setAuthState('unauthenticated');
+          return;
+        }
+
+        const cached =
+          typeof window !== 'undefined'
+            ? window.localStorage.getItem(LS_DEV_GUEST_TOKEN)
+            : null;
+        if (cached && cached.length > 0) {
+          devGuestTokenRef.current = cached;
+          if (!cancelled) setAuthState('authenticated');
+          return;
+        }
+
+        const fresh = await mintDevGuestToken(agentEndpoint);
         if (cancelled) return;
-        guestTokenRef.current = fresh;
-        window.localStorage.setItem(LS_GUEST_TOKEN, fresh);
-        setGuestTokenReady(true);
+        devGuestTokenRef.current = fresh;
+        window.localStorage.setItem(LS_DEV_GUEST_TOKEN, fresh);
+        setAuthState('authenticated');
       } catch (err) {
-        console.warn('[Chat] guest-token mint failed', err);
-        // Surface as "ready" anyway — requests will 401 + show error
-        // entries; better than a permanent loading state.
-        if (!cancelled) setGuestTokenReady(true);
+        console.warn('[Chat] auth bootstrap failed', err);
+        if (!cancelled) {
+          setAuthState(devGuestAuthEnabled() ? 'authenticated' : 'unauthenticated');
+        }
       }
     })();
     return () => {
@@ -140,30 +181,31 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     };
   }, [agentEndpoint]);
 
-  // Stable chat id from URL (initial) + server-allocated thereafter.
   const [chatId, setChatId] = useState<string | undefined>(() =>
     getInitialChatId(),
   );
 
   const getAuthToken = useCallback(
-    () => guestTokenRef.current ?? undefined,
+    () => devGuestTokenRef.current ?? undefined,
     [],
   );
 
-  // 401 handler: clear the cached token, mint a fresh one, signal
-  // retry. The hook reissues the failing request once on `true`.
   const onUnauthenticated = useCallback(async (): Promise<boolean> => {
+    if (!devGuestAuthEnabled()) {
+      setAuthState('unauthenticated');
+      return false;
+    }
+
     try {
-      const fresh = await mintGuestToken(agentEndpoint);
-      guestTokenRef.current = fresh;
-      window.localStorage.setItem(LS_GUEST_TOKEN, fresh);
+      const fresh = await mintDevGuestToken(agentEndpoint);
+      devGuestTokenRef.current = fresh;
+      window.localStorage.setItem(LS_DEV_GUEST_TOKEN, fresh);
       return true;
     } catch (err) {
-      console.warn('[Chat] guest-token refresh failed', err);
+      console.warn('[Chat] development guest-token refresh failed', err);
       return false;
     }
   }, [agentEndpoint]);
-
   // Stamp the server-allocated chatId into URL + state once
   // received. Quiet when the URL already carries the right id (this
   // covers the rehydration path).
@@ -237,11 +279,69 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     }
   };
 
-  if (!guestTokenReady) {
+  const onLoginSubmit = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setLoginError(null);
+    void (async () => {
+      try {
+        await loginWithCookieSession(agentEndpoint, loginUserId.trim(), loginPassword);
+        devGuestTokenRef.current = null;
+        setLoginPassword('');
+        setAuthState('authenticated');
+      } catch (err) {
+        setLoginError(err instanceof Error ? err.message : String(err));
+        setAuthState('unauthenticated');
+      }
+    })();
+  };
+
+  if (authState === 'checking') {
     return (
       <div style={{ padding: 24, color: '#888', fontFamily: 'system-ui' }}>
-        Provisioning guest session…
+        Checking secure session…
       </div>
+    );
+  }
+
+  if (authState === 'unauthenticated') {
+    return (
+      <form
+        onSubmit={onLoginSubmit}
+        style={{
+          maxWidth: 360,
+          margin: '80px auto',
+          display: 'grid',
+          gap: 12,
+          fontFamily: 'system-ui',
+        }}
+      >
+        <h1 style={{ margin: 0, fontSize: 24 }}>Sign in to AInder</h1>
+        <p style={{ margin: 0, color: '#666', fontSize: 14 }}>
+          Production chat access requires a secure server-side session.
+        </p>
+        <input
+          autoFocus
+          name="userId"
+          placeholder="User ID"
+          value={loginUserId}
+          onChange={(e) => setLoginUserId(e.target.value)}
+          style={{ padding: 10 }}
+        />
+        <input
+          name="password"
+          placeholder="Password"
+          type="password"
+          value={loginPassword}
+          onChange={(e) => setLoginPassword(e.target.value)}
+          style={{ padding: 10 }}
+        />
+        {loginError !== null ? (
+          <p style={{ color: '#c00', margin: 0 }}>{loginError}</p>
+        ) : null}
+        <button type="submit" disabled={!loginUserId.trim() || !loginPassword}>
+          Sign in
+        </button>
+      </form>
     );
   }
 
@@ -564,6 +664,7 @@ function ResourceFrame({
         const resp = await fetch(`${agentEndpoint}/agent`, {
           method: 'POST',
           headers,
+          credentials: 'include',
           body: JSON.stringify({
             kind: 'tool-call',
             name: params.name,

@@ -3,30 +3,33 @@ import { ThemeProvider, getRawTheme } from '@ggui-ai/design/themes';
 import { Chat } from './Chat';
 
 /**
- * Public agent backend URL. Resolution order:
- *
- *   1. `?agent=<url>` URL query param. Lets one built bundle drive any
- *      agent backend at runtime — the parallel e2e harness uses this
- *      so all workers share a single Vite build but each navigates to
- *      its own worker-local agent URL.
- *   2. `VITE_AGENT_ENDPOINT_URL` env var (baked in at build time).
- *      Right for single-tenant deployments where the backend URL is
- *      known at build.
- *   3. The e2e harness default (claude-agent-sdk on 6790) so a developer
- *      running `pnpm dev` without `.env.local` still gets a working
- *      shell against a stock harness.
- *
- * Resolved synchronously at module load. The query param is read once
- * and never re-read — switching backends requires a new page load
- * (deliberate; the conversation state is keyed by `chatId`, which is
- * also URL-resident).
+ * Public agent backend URL. Production bundles fail closed: they must be
+ * built with an explicit non-localhost `VITE_AGENT_ENDPOINT_URL` and cannot
+ * be retargeted with a query-string override. Local development may still use
+ * `?agent=<url>` or the localhost default for worker/e2e convenience.
  */
 function resolveAgentEndpoint(): string {
-  if (typeof window !== 'undefined') {
+  const configured = import.meta.env.VITE_AGENT_ENDPOINT_URL?.trim();
+
+  if (!import.meta.env.PROD && typeof window !== 'undefined') {
     const fromUrl = new URL(window.location.href).searchParams.get('agent');
     if (fromUrl !== null && fromUrl.length > 0) return fromUrl;
   }
-  return import.meta.env.VITE_AGENT_ENDPOINT_URL ?? 'http://localhost:6790';
+
+  if (configured) {
+    const parsed = new URL(configured);
+    if (
+      import.meta.env.PROD &&
+      (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+    ) {
+      throw new Error('Production VITE_AGENT_ENDPOINT_URL must not point at localhost.');
+    }
+    return parsed.toString().replace(/\/$/, '');
+  }
+
+  if (!import.meta.env.PROD) return 'http://localhost:6790';
+
+  throw new Error('Production build requires VITE_AGENT_ENDPOINT_URL.');
 }
 
 const AGENT_ENDPOINT = resolveAgentEndpoint();
