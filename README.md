@@ -127,6 +127,33 @@ pnpm dev:web
 11. Cocoun demo friend persona council report 생성
 12. 양쪽 동의 전까지 report locked
 
+### 데모 실행 팁
+
+로컬 데모 기본 계정:
+```text
+user id: demo
+password: demo
+```
+
+데모 시연 추천 순서:
+1. 로그인
+2. `.txt` 업로드
+3. redaction summary 확인
+4. persona trait 공개 범위 조정
+5. public profile publish
+6. swipe deck 진입
+7. 왼쪽 스와이프
+8. direct chat 또는 simulation
+9. match request 생성
+10. accepted match 확인
+11. Cocoun demo friend report 생성
+12. report reveal consent가 양쪽 전에는 locked인 것 확인
+
+### 데모 범위 주의
+
+현재 저장소는 **해커톤 데모 기준으로는 충분**하지만, production ready는 아닙니다.
+실서비스 전환은 `.gjc/plans/ainder-production-hardening.md` 기준으로 별도 하드닝이 더 필요합니다.
+
 ## 구현 상태
 
 현재 구현된 핵심 영역:
