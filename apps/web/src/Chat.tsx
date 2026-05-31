@@ -66,20 +66,28 @@ type AuthState = 'checking' | 'authenticated' | 'unauthenticated';
 
 
 
-async function hasCookieSession(agentEndpoint: string): Promise<boolean> {
+async function hasCookieSession(agentEndpoint: string): Promise<{
+  authenticated: boolean;
+  csrfToken: string | null;
+}> {
   const res = await fetch(`${agentEndpoint}/auth/me`, {
     method: 'GET',
     credentials: 'include',
     headers: { Accept: 'application/json' },
   });
-  return res.ok;
+  if (!res.ok) return { authenticated: false, csrfToken: null };
+  const body = (await res.json()) as { authenticated?: unknown; csrfToken?: unknown };
+  return {
+    authenticated: body.authenticated === true,
+    csrfToken: typeof body.csrfToken === 'string' && body.csrfToken.length > 0 ? body.csrfToken : null,
+  };
 }
 
 async function loginWithCookieSession(
   agentEndpoint: string,
   userId: string,
   password: string,
-): Promise<void> {
+): Promise<string> {
   const res = await fetch(`${agentEndpoint}/auth/login`, {
     method: 'POST',
     credentials: 'include',
@@ -89,13 +97,24 @@ async function loginWithCookieSession(
   if (!res.ok) {
     throw new Error(`login failed (${res.status})`);
   }
+  const body = (await res.json()) as { csrfToken?: unknown };
+  if (typeof body.csrfToken !== 'string' || body.csrfToken.length === 0) {
+    throw new Error('login succeeded without csrf token');
+  }
+  return body.csrfToken;
 }
 
-async function logoutCookieSession(agentEndpoint: string): Promise<void> {
+async function logoutCookieSession(
+  agentEndpoint: string,
+  csrfToken: string | null,
+): Promise<void> {
   await fetch(`${agentEndpoint}/auth/logout`, {
     method: 'POST',
     credentials: 'include',
-    headers: { Accept: 'application/json' },
+    headers: {
+      Accept: 'application/json',
+      ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
+    },
   });
 }
 
@@ -128,11 +147,13 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
   const [loginUserId, setLoginUserId] = useState(import.meta.env.DEV ? 'demo' : '');
   const [loginPassword, setLoginPassword] = useState(import.meta.env.DEV ? 'demo' : '');
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [csrfToken, setCsrfToken] = useState<string | null>(null);
 
   const getAuthToken = useCallback(() => undefined, []);
 
   const onUnauthenticated = useCallback(async (): Promise<boolean> => {
     setAuthState('unauthenticated');
+    setCsrfToken(null);
     return false;
   }, []);
 
@@ -161,8 +182,13 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
             ? input.toString()
             : input.url;
       if (requestUrl.startsWith(normalizedAgentEndpoint)) {
+        const headers = new Headers(init?.headers ?? undefined);
+        if (!headers.has('x-csrf-token') && csrfToken) {
+          headers.set('x-csrf-token', csrfToken);
+        }
         return originalFetch(input, {
           ...init,
+          headers,
           credentials: init?.credentials ?? 'include',
         });
       }
@@ -171,19 +197,21 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     return () => {
       window.fetch = originalFetch;
     };
-  }, [agentEndpoint]);
+  }, [agentEndpoint, csrfToken]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const authenticated = await hasCookieSession(agentEndpoint);
+        const session = await hasCookieSession(agentEndpoint);
         if (!cancelled) {
-          setAuthState(authenticated ? 'authenticated' : 'unauthenticated');
+          setAuthState(session.authenticated ? 'authenticated' : 'unauthenticated');
+          setCsrfToken(session.csrfToken);
         }
       } catch (err) {
         if (!cancelled) {
           setAuthState('unauthenticated');
+          setCsrfToken(null);
           setLoginError(err instanceof Error ? err.message : String(err));
         }
       }
@@ -236,21 +264,24 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     e.preventDefault();
     setLoginError(null);
     try {
-      await loginWithCookieSession(agentEndpoint, loginUserId, loginPassword);
+      const token = await loginWithCookieSession(agentEndpoint, loginUserId, loginPassword);
+      setCsrfToken(token);
       setAuthState('authenticated');
     } catch (err) {
       setLoginError(err instanceof Error ? err.message : String(err));
       setAuthState('unauthenticated');
+      setCsrfToken(null);
     }
   };
 
   const onLogout = async () => {
-    await logoutCookieSession(agentEndpoint);
+    await logoutCookieSession(agentEndpoint, csrfToken);
     abort();
     const url = new URL(window.location.href);
     url.searchParams.delete(URL_CHAT_PARAM);
     window.history.replaceState({}, '', url.toString());
     setChatId(undefined);
+    setCsrfToken(null);
     setAuthState('unauthenticated');
   };
 

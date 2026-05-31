@@ -31,6 +31,7 @@ interface CookieSessionAuthOptions {
 interface SessionRecord {
   readonly sessionIdHash: string;
   readonly userId: string;
+  readonly csrfToken: string;
   readonly createdAt: number;
   readonly expiresAt: number;
 }
@@ -112,6 +113,10 @@ export function createCookieSessionAuth(opts: CookieSessionAuthOptions): AuthAda
       if (rejectOrigin(req)) return null;
       const session = findSession(req);
       if (!session) return null;
+      if (req.method !== 'GET') {
+        const csrfToken = req.headers.get('x-csrf-token');
+        if (!csrfToken || !constantTimeEqual(csrfToken, session.csrfToken)) return null;
+      }
       return {
         principal: { kind: 'user', userId: session.userId } satisfies Principal,
         responseHeaders: headersFor(req, requestId),
@@ -131,15 +136,17 @@ export function createCookieSessionAuth(opts: CookieSessionAuthOptions): AuthAda
           }
           const rawSessionId = randomBytes(32).toString('base64url');
           const now = Date.now();
+          const csrfToken = randomBytes(24).toString('base64url');
           sessions.push({
             sessionIdHash: hashSessionId(opts.sessionSecret, rawSessionId),
             userId,
+            csrfToken,
             createdAt: now,
             expiresAt: now + SESSION_TTL_MS,
           });
           persist();
           return c.json(
-            { authenticated: true, userId },
+            { authenticated: true, userId, csrfToken },
             200,
             {
               ...headersFor(req, requestId),
@@ -154,13 +161,19 @@ export function createCookieSessionAuth(opts: CookieSessionAuthOptions): AuthAda
           if (rejectOrigin(req)) return c.json({ error: 'origin_not_allowed' }, 403, headersFor(req, requestId));
           const session = findSession(req);
           if (!session) return c.json({ authenticated: false }, 401, headersFor(req, requestId));
-          return c.json({ authenticated: true, userId: session.userId }, 200, headersFor(req, requestId));
+          return c.json({ authenticated: true, userId: session.userId, csrfToken: session.csrfToken }, 200, headersFor(req, requestId));
         });
 
         router.post(`${prefix}/logout`, (c: any) => {
           const req: Request = c.req.raw;
           const requestId = req.headers.get('x-request-id') ?? randomBytes(8).toString('hex');
           if (rejectOrigin(req)) return c.json({ error: 'origin_not_allowed' }, 403, headersFor(req, requestId));
+          const session = findSession(req);
+          if (!session) return c.json({ authenticated: false }, 401, headersFor(req, requestId));
+          const csrfToken = req.headers.get('x-csrf-token');
+          if (!csrfToken || !constantTimeEqual(csrfToken, session.csrfToken)) {
+            return c.json({ error: 'csrf_invalid' }, 403, headersFor(req, requestId));
+          }
           const rawSessionId = parseCookies(req.headers.get('cookie'))[SESSION_COOKIE];
           if (rawSessionId) {
             const hash = hashSessionId(opts.sessionSecret, rawSessionId);
@@ -194,6 +207,7 @@ function loadSessions(storeFile: string | undefined): SessionRecord[] {
     return (
       typeof row.sessionIdHash === 'string' &&
       typeof row.userId === 'string' &&
+      typeof row.csrfToken === 'string' &&
       typeof row.createdAt === 'number' &&
       typeof row.expiresAt === 'number'
     );
