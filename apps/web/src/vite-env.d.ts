@@ -9,9 +9,9 @@
  */
 interface ImportMetaEnv {
   /**
-   * MCP-Apps-spec agent backend base URL. Production builds require an
-   * explicit non-localhost value; local development may omit it and use the
-   * localhost dev default.
+   * MCP-Apps-spec agent backend base URL. Required for production builds;
+   * optional only in local development where the shell falls back to the
+   * local harness default.
    */
   readonly VITE_AGENT_ENDPOINT_URL?: string;
 }

@@ -1,5 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-
 export type Visibility = 'public' | 'private' | 'hidden';
 export type PersonaConversationMode = 'direct' | 'simulation';
 export type ProviderStatus = 'notStarted' | 'providerSuccess' | 'providerFailure' | 'cachedDemo' | 'seededFallback';
@@ -200,6 +201,15 @@ export interface ProviderCallRecord {
   createdAt: string;
 }
 
+export interface AuditEvent {
+  id: string;
+  action: string;
+  actorUserId: string | null;
+  subjectId: string | null;
+  requestId: string | null;
+  createdAt: string;
+}
+
 export interface AinderState {
   currentUserId: string;
   builderOpenAiKeyConfigured: boolean;
@@ -269,7 +279,9 @@ export interface AinderStore {
 }
 
 export interface AinderStoreOptions {
-  readonly demoBootstrap?: boolean;
+  readonly seedDemo?: boolean;
+  readonly persistencePath?: string | null;
+  readonly requirePersistence?: boolean;
 }
 
 const DEFAULT_SAMPLE = `2026. 5. 20. 오후 8:01, 민지 : 오늘 회사 앞 강남역에서 봤잖아\n2026. 5. 20. 오후 8:02, 나 : 010-1234-5678로 전화하지 말고 카톡해줘\n2026. 5. 20. 오후 8:04, 민지 : 너는 왜 그렇게 느꼈는지 꼭 물어보더라\n2026. 5. 20. 오후 8:05, 나 : 결론보다 그때 기분이 어땠는지가 궁금해\n2026. 5. 20. 오후 8:06, 민지 : 급하게 정하는 건 부담스러워하는 편이지?\n2026. 5. 20. 오후 8:07, 나 : 응 천천히 알아가는 게 좋아`;
@@ -279,17 +291,23 @@ function now(): string {
 }
 
 function hashPassword(password: string): string {
-  const salt = randomBytes(16).toString('base64url');
-  const derived = scryptSync(password, salt, 64).toString('base64url');
-  return `scrypt:v1:${salt}:${derived}`;
+  const salt = randomBytes(16);
+  const derived = scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
+  return `scrypt:v1:${salt.toString('base64url')}:${derived.toString('base64url')}`;
 }
 
-function verifyPassword(password: string, stored: string): boolean {
-  const [, version, salt, expected] = stored.split(':');
-  if (version !== 'v1' || !salt || !expected) return false;
-  const actual = scryptSync(password, salt, 64);
-  const expectedBytes = Buffer.from(expected, 'base64url');
-  return actual.byteLength === expectedBytes.byteLength && timingSafeEqual(actual, expectedBytes);
+function verifyPassword(password: string, encoded: string): boolean {
+  const [, version, salt, digest] = encoded.split(':');
+  if (!encoded.startsWith('scrypt:') || version !== 'v1' || !salt || !digest) {
+    return false;
+  }
+  const expected = Buffer.from(digest, 'base64url');
+  const actual = scryptSync(password, Buffer.from(salt, 'base64url'), expected.length, {
+    N: 16384,
+    r: 8,
+    p: 1,
+  });
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 function nextId(prefix: string, counters: Map<string, number>): string {
@@ -302,12 +320,11 @@ function redact(text: string): { sanitizedText: string; summary: Array<{ categor
   let sanitizedText = text;
   const summary: Array<{ category: string; count: number }> = [];
   const patterns: Array<[string, RegExp, string]> = [
-    ['phone', /01\d-?\d{3,4}-?\d{4}/g, '[전화번호]'],
     ['email', /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[이메일]'],
-    ['account_id', /(?:카카오톡?\s*ID|카톡\s*ID|계정|아이디)[:：]?\s*[A-Za-z0-9._-]{3,}/gi, '[계정ID]'],
-    ['address', /(?:서울|부산|대구|인천|광주|대전|울산|경기|강남|홍대|잠실)[^\n,]*(?:로|길|동|역|아파트|오피스텔|회사 앞)/g, '[주소/위치]'],
-    ['employer_school', /(?:회사|직장|학교|대학교|대학원|팀|부서)\s*[:：]?\s*[가-힣A-Za-z0-9]+/g, '[직장/학교]'],
-    ['sensitive_phrase', /(주민등록번호|계좌번호|비밀번호|병원|진단|투약|성폭력|자해|스토킹)/g, '[민감표현]'],
+    ['phone', /01\d-?\d{3,4}-?\d{4}/g, '[전화번호]'],
+    ['account_id', /(?:카톡|kakao|id|아이디)[:\s]+[A-Za-z0-9._-]{3,}/gi, '[계정ID]'],
+    ['location', /(강남역|홍대|잠실|서울|부산|회사 앞|아파트|동호수)/g, '[위치]'],
+    ['employer_school', /(회사|학교|대학교|직장|팀|부서)/g, '[직장/학교]'],
     ['name_or_nickname', /(민지|도윤|하린|준)/g, '[이름]'],
   ];
   for (const [category, pattern, replacement] of patterns) {
@@ -444,15 +461,24 @@ function createSeedState(): AinderState {
     councilRuns: [],
     reports: [],
     consents: [],
-    auditEvents: [],
+    auditEvents: [
+      {
+        id: 'audit-seed-1',
+        action: 'demo.seed_bootstrap',
+        actorUserId: null,
+        subjectId: null,
+        requestId: null,
+        createdAt,
+      },
+    ],
   };
 }
 
 function createEmptyState(): AinderState {
   return {
     currentUserId: '',
-    builderOpenAiKeyConfigured: process.env.OPENAI_API_KEY !== undefined,
-    cocounKeyConfigured: process.env.COCOUN_API_KEY !== undefined,
+    builderOpenAiKeyConfigured: false,
+    cocounKeyConfigured: false,
     retainRawUploads: false,
     users: [],
     uploads: [],
@@ -471,41 +497,48 @@ function createEmptyState(): AinderState {
   };
 }
 
-export function createAinderStore(options: AinderStoreOptions = {}): AinderStore {
-  let state = options.demoBootstrap === true ? createSeedState() : createEmptyState();
+function loadState(path: string): AinderState {
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<AinderState>;
+  return { ...createEmptyState(), ...raw, auditEvents: raw.auditEvents ?? [] };
+}
+
+function persistState(path: string, state: AinderState): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+function primeCounters(state: AinderState, counters: Map<string, number>): void {
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (value === null || typeof value !== 'object') return;
+    const id = (value as { id?: unknown }).id;
+    if (typeof id === 'string') {
+      const match = /^(.+)-(\d+)$/.exec(id);
+      if (match) {
+        counters.set(match[1]!, Math.max(counters.get(match[1]!) ?? 0, Number(match[2])));
+      }
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(state);
+}
+
+export function createAinderStore(opts: AinderStoreOptions = {}): AinderStore {
+  const persistencePath = opts.persistencePath ?? null;
+  if (opts.requirePersistence === true && !persistencePath) {
+    throw new Error('AINDER_STATE_FILE is required when durable state is required.');
+  }
+  const hasPersistedState = persistencePath !== null && existsSync(persistencePath);
+  let state = hasPersistedState
+    ? loadState(persistencePath!)
+    : opts.seedDemo === true
+      ? createSeedState()
+      : createEmptyState();
   const counters = new Map<string, number>();
-  const persist = () => persistState(state, opts.dataFile);
-  const audit = (
-    action: AuthAuditEvent['action'],
-    status: AuthAuditEvent['status'],
-    subjectId: string | null = null,
-    userId = state.currentUserId,
-  ) => {
-    state.auditEvents.push({
-      id: nextId('audit', counters),
-      requestId: null,
-      userId,
-      action,
-      status,
-      subjectId,
-      createdAt: now(),
-    });
-  };
-  const recordProviderCall = (
-    provider: ProviderCallRecord['provider'],
-    purpose: string,
-    status: ProviderStatus,
-  ) => {
-    state.providerCalls.push({
-      id: nextId('provider-call', counters),
-      requestId: null,
-      provider,
-      purpose,
-      status,
-      correlationId: randomBytes(12).toString('hex'),
-      createdAt: now(),
-    });
-  };
+  primeCounters(state, counters);
 
   const currentUser = (): User => {
     const user = state.users.find((u) => u.id === state.currentUserId);
@@ -521,13 +554,13 @@ export function createAinderStore(options: AinderStoreOptions = {}): AinderStore
     return report;
   };
 
-  return {
+  const api: AinderStore = {
     state: () => state,
     persist,
     reset() {
-      state = options.demoBootstrap === true ? createSeedState() : createEmptyState();
+      state = opts.seedDemo === true ? createSeedState() : createEmptyState();
       counters.clear();
-      persist();
+      primeCounters(state, counters);
     },
     createUser(userId, password) {
       if (state.users.some((u) => u.userId === userId)) throw new Error('User already exists.');
@@ -550,24 +583,9 @@ export function createAinderStore(options: AinderStoreOptions = {}): AinderStore
       return user;
     },
     login(userId, password) {
-      const user = state.users.find((u) => u.userId === userId);
-      if (user && verifyPassword(password, user.passwordHash)) {
-        state.currentUserId = user.id;
-        createAuditEvent(state, counters, {
-          requestId: null,
-          actorUserId: user.id,
-          eventType: 'auth.login_success',
-          subjectId: user.id,
-        });
-        return user;
-      }
-      createAuditEvent(state, counters, {
-        requestId: null,
-        actorUserId: null,
-        eventType: 'auth.login_failure',
-        subjectId: userId,
-      });
-      return null;
+      const user = state.users.find((u) => u.userId === userId && verifyPassword(password, u.passwordHash));
+      if (user) state.currentUserId = user.id;
+      return user ?? null;
     },
     currentUser,
     configureBuilderOpenAiKey() {
@@ -1125,4 +1143,58 @@ export function createAinderStore(options: AinderStoreOptions = {}): AinderStore
       return state.reports.find((r) => r.id === reportId) ?? null;
     },
   };
+
+  const writeMethods = new Set<keyof AinderStore>([
+    'reset',
+    'createUser',
+    'login',
+    'configureBuilderOpenAiKey',
+    'configureCocounKey',
+    'saveRetentionPreference',
+    'uploadKakaoTxt',
+    'sanitizeConversation',
+    'deleteRawUpload',
+    'confirmSanitizedConversation',
+    'generatePersonaProfile',
+    'setPersonaFieldVisibility',
+    'updatePersonaSection',
+    'confirmPublicProfileFields',
+    'publishPublicProfile',
+    'recordSwipeInterest',
+    'startDirectPersonaChat',
+    'sendDirectPersonaMessage',
+    'startToblPersonaSimulation',
+    'runToblSimulationTurns',
+    'continuePersonaExploration',
+    'createMatchRequestFromConversation',
+    'respondMatchRequest',
+    'generateMatchReport',
+    'selectFriendPersonaCouncilMembers',
+    'startCocounReportCouncil',
+    'summarizeCocounCouncilOutput',
+    'requestReportReveal',
+    'consentReportReveal',
+  ]);
+
+  return new Proxy(api, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== 'function' || !writeMethods.has(prop as keyof AinderStore)) {
+        return value;
+      }
+      return (...args: unknown[]) => {
+        const result = value.apply(target, args);
+        state.auditEvents.push({
+          id: nextId('audit', counters),
+          action: String(prop),
+          actorUserId: state.currentUserId || null,
+          subjectId: typeof args[0] === 'string' ? args[0] : null,
+          requestId: null,
+          createdAt: now(),
+        });
+        if (persistencePath !== null) persistState(persistencePath, state);
+        return result;
+      };
+    },
+  });
 }

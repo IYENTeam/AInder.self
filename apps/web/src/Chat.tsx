@@ -57,7 +57,11 @@ interface ChatProps {
   readonly sandboxUrl: string;
 }
 
-// Chat id is URL-resident so cross-tab links land on the same conversation.
+// Dev-only localStorage key for the guest-token flow. Production uses the
+// server-side session cookie transport; the browser must not mint or persist
+// bearer credentials outside local development.
+const DEV_GUEST_AUTH_ENABLED = import.meta.env.DEV;
+const LS_GUEST_TOKEN = 'ggui-basic-web/guestToken';
 const URL_CHAT_PARAM = 'chat';
 
 type AuthState = 'checking' | 'authenticated' | 'unauthenticated';
@@ -120,22 +124,41 @@ function getInitialChatId(): string | undefined {
   );
   return fromUrl && fromUrl.length > 0 ? fromUrl : undefined;
 }
-type SessionBootstrapState = 'checking' | 'ready' | 'unauthenticated';
+
+/**
+ * Mint a fresh guest token from the dev backend. This path is intentionally
+ * unavailable in production builds so guest bearer auth cannot become a
+ * production fallback.
+ */
+async function mintGuestToken(agentEndpoint: string): Promise<string> {
+  if (!DEV_GUEST_AUTH_ENABLED) {
+    throw new Error('guest bearer auth is disabled outside development.');
+  }
+  const res = await fetch(`${agentEndpoint}/auth/guest`, { method: 'POST' });
+  if (!res.ok) {
+    throw new Error(`POST /auth/guest returned ${res.status}`);
+  }
+  const body = (await res.json()) as { guestToken?: unknown };
+  if (typeof body.guestToken !== 'string' || body.guestToken.length === 0) {
+    throw new Error('POST /auth/guest response missing guestToken');
+  }
+  return body.guestToken;
+}
 
 /**
  * Chat panel + iframe area for an MCP-Apps-spec agent backend.
  *
- * Auth: production uses secure, HttpOnly cookie sessions owned by the
- * backend. The browser never mints, caches, or refreshes guest bearer tokens.
+ * Auth: production relies on secure, server-side session cookies. The legacy
+ * guest bearer token bootstrap remains dev-only for local harnesses.
  */
 export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
-  const [sessionState, setSessionState] =
-    useState<SessionBootstrapState>('checking');
+  const guestTokenRef = useRef<string | null>(null);
+  const [guestTokenReady, setGuestTokenReady] = useState(!DEV_GUEST_AUTH_ENABLED);
 
-  // Boot: verify the backend has an authenticated cookie session. Missing
-  // session is surfaced as a closed state; there is intentionally no
-  // production guest-token fallback.
+  // Dev boot: pull cached token from localStorage; mint a fresh one if absent.
+  // Production skips this path entirely and lets cookie/session auth fail closed.
   useEffect(() => {
+    if (!DEV_GUEST_AUTH_ENABLED) return;
     let cancelled = false;
     void (async () => {
       setAuthState('checking');
@@ -148,8 +171,8 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
         });
         if (!cancelled) setSessionState(res.ok ? 'ready' : 'unauthenticated');
       } catch (err) {
-        console.warn('[Chat] session bootstrap failed', err);
-        if (!cancelled) setSessionState('unauthenticated');
+        console.warn('[Chat] guest-token mint failed', err);
+        if (!cancelled) setGuestTokenReady(true);
       }
     })();
     return () => {
@@ -161,7 +184,26 @@ export function Chat({ agentEndpoint, sandboxUrl }: ChatProps) {
     getInitialChatId(),
   );
 
+  const getAuthToken = useCallback(
+    () =>
+      DEV_GUEST_AUTH_ENABLED ? (guestTokenRef.current ?? undefined) : undefined,
+    [],
+  );
 
+  // 401 handler: development refreshes the guest token once. Production does
+  // not create fallback credentials; session failures remain 401s.
+  const onUnauthenticated = useCallback(async (): Promise<boolean> => {
+    if (!DEV_GUEST_AUTH_ENABLED) return false;
+    try {
+      const fresh = await mintGuestToken(agentEndpoint);
+      guestTokenRef.current = fresh;
+      window.localStorage.setItem(LS_GUEST_TOKEN, fresh);
+      return true;
+    } catch (err) {
+      console.warn('[Chat] guest-token refresh failed', err);
+      return false;
+    }
+  }, [agentEndpoint]);
 
   // Stamp the server-allocated chatId into URL + state once
   // received. Quiet when the URL already carries the right id (this

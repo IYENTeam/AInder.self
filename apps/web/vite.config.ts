@@ -28,23 +28,30 @@ import react from '@vitejs/plugin-react';
  *   - No `transpilePackages` equivalent needed: Vite walks workspace
  *     symlinks natively and the @ggui-ai/* packages ship usable ESM.
  */
-const SERVER_PORT = Number(process.env.VITE_SERVER_PORT ?? process.env.PORT ?? 6890);
-
 export default defineConfig(({ command, mode }) => {
-  const env = loadEnv(mode, process.cwd(), 'VITE_');
-  if (command === 'build' && !env.VITE_AGENT_ENDPOINT_URL?.trim()) {
-    throw new Error('VITE_AGENT_ENDPOINT_URL is required for production web builds.');
+  const env = loadEnv(mode, process.cwd(), '');
+  const serverPort = Number(env.VITE_SERVER_PORT ?? env.PORT ?? 6890);
+  const agentEndpoint = env.VITE_AGENT_ENDPOINT_URL?.trim();
+
+  if (command === 'build' && mode === 'production') {
+    if (!agentEndpoint) {
+      throw new Error('VITE_AGENT_ENDPOINT_URL is required for production builds.');
+    }
+    const parsed = new URL(agentEndpoint);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
+      throw new Error('VITE_AGENT_ENDPOINT_URL must not point at localhost in production.');
+    }
   }
 
   return {
     plugins: [react()],
     server: {
-      port: SERVER_PORT,
+      port: serverPort,
       strictPort: true,
       host: '127.0.0.1',
     },
     preview: {
-      port: SERVER_PORT,
+      port: serverPort,
       strictPort: true,
       host: true,
       allowedHosts: true,

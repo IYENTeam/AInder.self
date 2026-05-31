@@ -1,10 +1,10 @@
-# Railway deploy config — agentic-app-template (OpenAI Agents SDK)
+# Railway deploy config — AInder production baseline
 #
-# This template deploys as FOUR Railway services from a single repo:
+# Deploys the current in-place topology as four Railway services:
 #
 #   agent  → servers/agent          — OpenAI Agents SDK backend (HTTP API + sandbox-proxy)
-#   ggui   → servers/ggui           — `ggui serve` MCP server (renders UI on the agent's behalf)
-#   todo   → servers/mcps/todo      — sample domain MCP server (todo CRUD)
+#   ggui   → servers/ggui           — `ggui serve` MCP server (renders UI)
+#   ainder → servers/mcps/todo      — AInder domain MCP server
 #   web    → apps/web               — Vite SPA frontend
 #
 # Railway wires services together via `${{<svc>.PRIVATE_DOMAIN}}` (internal
@@ -54,15 +54,20 @@ PORT = "6781"
 # an OpenAI model, so set the same OPENAI_API_KEY here as the agent uses.
 # OPENAI_API_KEY = "sk-..."
 
-# ── todo (sample domain MCP) ─────────────────────────────────────────────
-# Replace this block with your own MCP servers as your app grows. Private
-# (no public domain) — only the agent talks to it.
+# ── ainder domain MCP ─────────────────────────────────────────────────────
+# Private — only the agent talks to it. Production requires durable state and
+# explicit browser/service origin policy.
 [services.todo]
 buildCommand = "pnpm install --frozen-lockfile && pnpm --filter ./servers/mcps/todo build"
 startCommand = "pnpm --filter ./servers/mcps/todo start"
 
 [services.todo.env]
 PORT = "6782"
+NODE_ENV = "production"
+AINDER_STATE_FILE = "/data/ainder-state.json"
+AINDER_ENABLE_ADMIN_ENDPOINTS = "false"
+AINDER_ENABLE_DEMO_BOOTSTRAP = "false"
+AINDER_ALLOWED_ORIGINS = "https://${{web.RAILWAY_PUBLIC_DOMAIN}},https://${{agent.RAILWAY_PUBLIC_DOMAIN}}"
 
 # ── web (frontend SPA) ───────────────────────────────────────────────────
 # Vite build → `vite preview` (or any static-host adapter). Public.

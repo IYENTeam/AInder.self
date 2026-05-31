@@ -126,23 +126,16 @@ This sample is one of three SDK-specific backends with identical wire surface ar
 - `@ggui-samples/agent-openai-sdk` (this) — OpenAI Agents SDK (GPT-5.5)
 - `@ggui-samples/agent-google-adk` — Google ADK (Gemini)
 
-To swap drivers, point the frontend's `VITE_AGENT_ENDPOINT_URL` at the sample backend you're running — all three samples now default to 6790, so override `PORT` to run more than one at once. The same `<AppRenderer>` works against any of them because the wire shape (POST /chat SSE of `SDKMessage`-shaped events, ggui MCP `_meta` envelope) is identical.
+For AInder production, `VITE_AGENT_ENDPOINT_URL` is required and must not point
+at localhost. Local development may still use the localhost defaults and
+`?agent=<url>` override.
 
-## Plugging into a non-Vite frontend
+## Browser security contract
 
-The backend is pure node:http with wide-open CORS for dev — any frontend that can fetch SSE, fetch JSON, and mount `<AppRenderer>` (or any MCP-Apps-spec iframe host) works:
-
-- **Next.js** — fetch `/chat` from a route handler or directly from a client component
-- **Remix / Astro / SvelteKit** — same; the wire is HTTP+SSE
-- **Plain HTML** — `EventSource('http://localhost:6790/chat')` works
-
-The frontend needs to:
-
-1. POST a prompt to `/chat` and read the SSE stream
-2. Fetch `/sandbox-proxy-url` once on mount and thread the URL into `<AppRenderer sandbox.url>`
-3. Implement `onToolCall` / `onReadResource` to forward iframe requests to `/relay/tools-call` and `/relay/resources-read`
-
-The `useMcpAppsChat` hook in `@ggui-ai/react/chat-helpers` does all three.
+Development can use local origins and guest-token helpers. Production must be
+deployed with explicit web/agent/GGUI/MCP origins, secure-cookie server-side
+sessions, no guest bearer fallback, and no localhost MCP defaults. The backend
+fails boot if `OPENAI_API_KEY` or production MCP URLs are missing.
 
 ## Not used for
 

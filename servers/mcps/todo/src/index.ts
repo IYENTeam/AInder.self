@@ -42,42 +42,20 @@ function parsePort(): number {
   return 6782;
 }
 
-function parseOrigins(value: string | undefined): ReadonlySet<string> {
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const ADMIN_ENABLED =
+  !IS_PRODUCTION && process.env.AINDER_ENABLE_ADMIN_ENDPOINTS === 'true';
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = Number(process.env.AINDER_RATE_LIMIT_PER_MINUTE ?? 120);
+const buckets = new Map<string, { count: number; resetAt: number }>();
+
+function allowedOrigins(): Set<string> {
   return new Set(
-    (value ?? '')
+    (process.env.AINDER_ALLOWED_ORIGINS ?? '')
       .split(',')
       .map((origin) => origin.trim())
       .filter(Boolean),
   );
-}
-
-function loadConfig(): RuntimeConfig {
-  const nodeEnv = process.env.NODE_ENV ?? 'development';
-  const isProduction = nodeEnv === 'production';
-  const allowedOrigins = parseOrigins(process.env.AINDER_ALLOWED_ORIGINS);
-  const allowDemoBootstrap = process.env.AINDER_ALLOW_DEMO_BOOTSTRAP === 'true';
-  const adminEnabled = !isProduction && process.env.AINDER_ENABLE_ADMIN_DEBUG !== 'false';
-  const rateLimitMax = Number.parseInt(process.env.AINDER_RATE_LIMIT_PER_MINUTE ?? '', 10);
-
-  if (isProduction && allowedOrigins.size === 0) {
-    throw new Error('AINDER_ALLOWED_ORIGINS is required in production.');
-  }
-  if (isProduction && allowDemoBootstrap) {
-    throw new Error('AINDER_ALLOW_DEMO_BOOTSTRAP must not be true in production.');
-  }
-  if (isProduction && process.env.AINDER_ENABLE_ADMIN_DEBUG === 'true') {
-    throw new Error('AINDER_ENABLE_ADMIN_DEBUG must not be true in production.');
-  }
-
-  return {
-    nodeEnv,
-    isProduction,
-    port: parsePort(),
-    allowDemoBootstrap: !isProduction && allowDemoBootstrap,
-    adminEnabled,
-    allowedOrigins,
-    rateLimitMax: Number.isFinite(rateLimitMax) && rateLimitMax > 0 ? rateLimitMax : DEFAULT_RATE_LIMIT,
-  };
 }
 
 function setSecurityHeaders(res: ServerResponse, requestId: string): void {
@@ -85,41 +63,44 @@ function setSecurityHeaders(res: ServerResponse, requestId: string): void {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
 }
 
-function originAllowed(req: IncomingMessage, config: RuntimeConfig): boolean {
+function rejectUnapprovedOrigin(req: IncomingMessage, res: ServerResponse): boolean {
   const origin = req.headers.origin;
-  if (!origin) return true;
-  if (!config.isProduction && config.allowedOrigins.size === 0) return true;
-  return config.allowedOrigins.has(origin);
+  if (!IS_PRODUCTION || origin === undefined) return false;
+  const allowed = allowedOrigins();
+  if (allowed.has(origin)) return false;
+  res.writeHead(403, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'origin not allowed' }));
+  return true;
 }
 
-function clientKey(req: IncomingMessage): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-  return raw?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
-}
-
-function checkRateLimit(
-  buckets: Map<string, RateBucket>,
-  key: string,
-  max: number,
-  nowMs = Date.now(),
-): boolean {
-  const existing = buckets.get(key);
-  if (!existing || existing.resetAt <= nowMs) {
-    buckets.set(key, { count: 1, resetAt: nowMs + WINDOW_MS });
-    return true;
+function rateLimit(req: IncomingMessage, res: ServerResponse, requestId: string): boolean {
+  const nowMs = Date.now();
+  const key = `${req.socket.remoteAddress ?? 'unknown'}:${req.url ?? '/'}`;
+  const bucket = buckets.get(key);
+  if (!bucket || bucket.resetAt <= nowMs) {
+    buckets.set(key, { count: 1, resetAt: nowMs + RATE_LIMIT_WINDOW_MS });
+    return false;
   }
-  existing.count += 1;
-  return existing.count <= max;
+  bucket.count += 1;
+  if (bucket.count <= RATE_LIMIT_MAX) return false;
+  res.writeHead(429, {
+    'Content-Type': 'application/json',
+    'Retry-After': String(Math.ceil((bucket.resetAt - nowMs) / 1000)),
+  });
+  res.end(JSON.stringify({ error: 'rate limited', request_id: requestId }));
+  return true;
 }
 
 async function main(): Promise<void> {
-  const config = loadConfig();
-  const store = createAinderStore({ demoBootstrap: config.allowDemoBootstrap });
-  const buckets = new Map<string, RateBucket>();
+  const port = parsePort();
+  const store = createAinderStore({
+    seedDemo: process.env.AINDER_ENABLE_DEMO_BOOTSTRAP === 'true' || !IS_PRODUCTION,
+    persistencePath: process.env.AINDER_STATE_FILE,
+    requirePersistence: IS_PRODUCTION,
+  });
 
   const server = createServer((req, res) => {
     const requestId = randomUUID();
@@ -150,62 +131,29 @@ async function handleRequest(
   requestId: string,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://localhost`);
-
-  const origin = req.headers.origin;
-  if (origin && originAllowed(req, config)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  }
-  if (!originAllowed(req, config)) {
-    res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'origin_not_allowed', request_id: requestId }));
-    return;
-  }
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-CSRF-Token, X-Request-Id',
-    });
-    res.end();
+  const requestId = randomUUID();
+  setSecurityHeaders(res, requestId);
+  if (rejectUnapprovedOrigin(req, res) || rateLimit(req, res, requestId)) {
     return;
   }
 
-  const routeLimit = url.pathname.startsWith('/admin/') ? SENSITIVE_ROUTE_LIMIT : config.rateLimitMax;
-  const limitedKey = `${clientKey(req)}:${url.pathname}`;
-  if (!checkRateLimit(buckets, limitedKey, routeLimit)) {
-    res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60' });
-    res.end(JSON.stringify({ error: 'rate_limited', request_id: requestId }));
-    return;
-  }
-
-  if (url.pathname.startsWith('/admin/') && !config.adminEnabled) {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('not found');
-    return;
-  }
-
-  if (req.method === 'GET' && url.pathname === '/admin/state') {
-    if (!adminEndpointsEnabled()) {
+  if (url.pathname.startsWith('/admin/')) {
+    if (!ADMIN_ENABLED) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('not found');
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(store.state()));
-    return;
-  }
-
-  if (req.method === 'POST' && url.pathname === '/admin/reset') {
-    if (!adminEndpointsEnabled()) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('not found');
+    if (req.method === 'GET' && url.pathname === '/admin/state') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(store.state()));
       return;
     }
-    store.reset();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ cleared: true, request_id: requestId }));
-    return;
+    if (req.method === 'POST' && url.pathname === '/admin/reset') {
+      store.reset();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ cleared: true }));
+      return;
+    }
   }
 
   if (req.method === 'POST' && url.pathname === '/mcp') {

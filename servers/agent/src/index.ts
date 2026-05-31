@@ -49,72 +49,7 @@ if (envPath) {
   console.log(`[ainder-agent] loaded ${envPath}`);
 }
 
-const IS_PRODUCTION =
-  process.env.NODE_ENV === 'production' ||
-  process.env.AINDER_ENV === 'production' ||
-  process.env.RAILWAY_ENVIRONMENT_NAME === 'production';
-
-function requiredEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`${name} is required${IS_PRODUCTION ? ' in production' : ''}.`);
-  return value;
-}
-
-function optionalUrl(name: string, fallback?: string): string | undefined {
-  const value = process.env[name]?.trim() || fallback;
-  if (!value) return undefined;
-  const parsed = new URL(value);
-  if (IS_PRODUCTION && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')) {
-    throw new Error(`${name} must not point at localhost in production.`);
-  }
-  return parsed.toString();
-}
-
-function parseOrigins(raw: string | undefined): ReadonlySet<string> {
-  return new Set(
-    (raw ?? '')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean)
-      .map((item) => new URL(item).origin),
-  );
-}
-
-function resolveMcpServers(): Record<string, McpServerConfig> {
-  const servers: Record<string, McpServerConfig> = {};
-  const gguiUrl = optionalUrl('GGUI_MCP_URL', IS_PRODUCTION ? undefined : 'http://localhost:6781/mcp');
-  if (gguiUrl) servers.ggui = { url: gguiUrl };
-
-  const ainderUrl = optionalUrl('GGUI_AINDER_MCP_URL', IS_PRODUCTION ? undefined : 'http://localhost:6782/mcp');
-  if (ainderUrl) servers.ainder = { url: ainderUrl };
-
-  if (!IS_PRODUCTION) {
-    for (const [key, url] of Object.entries(process.env)) {
-      const match = /^GGUI_(.+)_MCP_URL$/.exec(key);
-      if (match && url) servers[match[1].toLowerCase()] = { url };
-    }
-  }
-
-  if (!servers.ggui) throw new Error('GGUI_MCP_URL is required.');
-  if (IS_PRODUCTION && !servers.ainder) throw new Error('GGUI_AINDER_MCP_URL is required in production.');
-  return servers;
-}
-
-function resolveAuth(): AuthAdapter | undefined {
-  if (!IS_PRODUCTION) return undefined;
-  const allowedOrigins = parseOrigins(requiredEnv('AINDER_ALLOWED_ORIGINS'));
-  return createCookieSessionAuth({
-    sessionSecret: requiredEnv('AINDER_SESSION_SECRET'),
-    userId: requiredEnv('AINDER_BOOTSTRAP_USER_ID'),
-    passwordHash: requiredEnv('AINDER_BOOTSTRAP_PASSWORD_HASH'),
-    storeFile: process.env.AINDER_SESSION_STORE_FILE?.trim() || '.data/agent-sessions.json',
-    secureCookies: true,
-    allowedOrigins,
-  });
-}
-
-const NODE_ENV = process.env.NODE_ENV ?? 'development';
-const IS_PRODUCTION = NODE_ENV === 'production';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -125,29 +60,31 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function assertNotLocalhost(name: string, value: string): void {
-  if (/^https?:\/\/(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)(?::|\/|$)/i.test(value)) {
+function requireUrl(name: string, fallback: string | null): string {
+  const raw = process.env[name]?.trim() || fallback;
+  if (!raw) {
+    console.error(`\n[ainder-agent] ${name} is required in production.\n`);
+    process.exit(1);
+  }
+  const parsed = new URL(raw);
+  if (
+    IS_PRODUCTION &&
+    (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+  ) {
     console.error(`\n[ainder-agent] ${name} must not point at localhost in production.\n`);
     process.exit(1);
   }
+  return raw;
 }
 
+// Fail loud + early when the provider key is missing. The agent loop AND
+// ggui's UI generation both need it; without it the agent would otherwise
+// crash mid-request with a buried error. (The `pnpm dev` orchestrator runs
+// the same check before booting — this also covers running the agent
+// standalone or in a deploy.)
 requireEnv('OPENAI_API_KEY');
 
-if (IS_PRODUCTION) {
-  requireEnv('AINDER_ALLOWED_ORIGINS');
-  requireEnv('AINDER_SESSION_SECRET');
-}
-const ALLOWED_ORIGINS = (process.env.AINDER_ALLOWED_ORIGINS ?? '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
-
-const PORT = Number(process.env.PORT ?? (IS_PRODUCTION ? '' : 6790));
-if (!Number.isFinite(PORT) || PORT <= 0) {
-  console.error('\n[ainder-agent] PORT is required in production and must be a positive number.\n');
-  process.exit(1);
-}
+const PORT = Number(process.env.PORT ?? 6790);
 const SANDBOX_PROXY_PORT = process.env.SANDBOX_PROXY_PORT
   ? Number(process.env.SANDBOX_PROXY_PORT)
   : IS_PRODUCTION
@@ -172,13 +109,16 @@ if (!gguiMcpUrl) {
 if (IS_PRODUCTION) assertNotLocalhost('GGUI_MCP_URL', gguiMcpUrl);
 
 const mcpServers: Record<string, McpServerConfig> = {
-  ggui: { url: gguiMcpUrl },
+  ggui: {
+    url: requireUrl('GGUI_MCP_URL', IS_PRODUCTION ? null : 'http://localhost:6781/mcp'),
+  },
 };
 for (const [key, url] of Object.entries(process.env)) {
   const match = /^GGUI_(.+)_MCP_URL$/.exec(key);
   if (match && url) {
-    if (IS_PRODUCTION) assertNotLocalhost(key, url);
-    mcpServers[match[1].toLowerCase()] = { url };
+    mcpServers[match[1].toLowerCase()] = {
+      url: requireUrl(key, null),
+    };
   }
 }
 

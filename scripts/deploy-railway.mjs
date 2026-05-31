@@ -143,7 +143,7 @@ const publicRef = (s) => `\${{${s.name}.RAILWAY_PUBLIC_DOMAIN}}`;
 const mcpEnvName = (s) => `GGUI_${s.name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_MCP_URL`;
 
 function serviceVars(svc, services) {
-  const vars = { NODE_ENV: 'production', PORT: String(svc.port) };
+  const vars = { PORT: String(svc.port), NODE_ENV: 'production' };
   if (svc.role === 'agent' || svc.role === 'ggui') {
     for (const k of llmKeys) vars[k] = process.env[k];
   }
@@ -166,6 +166,14 @@ function serviceVars(svc, services) {
     if (agent) vars.AINDER_SESSION_SECRET = process.env.AINDER_SESSION_SECRET;
     vars.AINDER_ALLOW_DEMO_BOOTSTRAP = 'false';
     vars.AINDER_ENABLE_ADMIN_DEBUG = 'false';
+  }
+  if (svc.role === 'mcp') {
+    const web = services.find((s) => s.role === 'web');
+    const agent = services.find((s) => s.role === 'agent');
+    vars.AINDER_STATE_FILE = '/data/ainder-state.json';
+    vars.AINDER_ENABLE_ADMIN_ENDPOINTS = 'false';
+    vars.AINDER_ENABLE_DEMO_BOOTSTRAP = 'false';
+    vars.AINDER_ALLOWED_ORIGINS = [web, agent].filter(Boolean).map((s) => `https://${publicRef(s)}`).join(',');
   }
   if (svc.role === 'web') {
     const agent = services.find((s) => s.role === 'agent');
