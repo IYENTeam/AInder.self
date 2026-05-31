@@ -40,7 +40,7 @@ jobs:
       - name: Build
         run: pnpm build
         env:
-          VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL || 'https://agent-ainder.iyen.io' }}
+          VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL || 'https://api-ainder.iyen.io' }}
 
   deploy-worker:
     name: Deploy web shell to Cloudflare Workers
@@ -68,14 +68,16 @@ jobs:
       - name: Build web assets
         run: pnpm --filter ./apps/web build
         env:
-          VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL }}
+          VITE_AGENT_ENDPOINT_URL: ${{ vars.VITE_AGENT_ENDPOINT_URL || 'https://api-ainder.iyen.io' }}
 
       - name: Deploy Cloudflare Worker
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+        run: pnpm wrangler deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # Prefer scoped API token; falls back to legacy Global API Key + email if set.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_GLOBAL_API_KEY }}
+          CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
 
   deploy-railway:
     name: Deploy backend stack to Railway
