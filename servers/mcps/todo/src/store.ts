@@ -341,6 +341,24 @@ function redact(text: string): { sanitizedText: string; summary: Array<{ categor
   return { sanitizedText, summary };
 }
 
+function validateKakaoExport(text: string): void {
+  const normalized = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (normalized.length < 2) {
+    throw new Error('KakaoTalk export is too short or empty.');
+  }
+
+  const messagePattern =
+    /^\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.\s*(오전|오후)\s*\d{1,2}:\d{2},\s*[^:]{1,40}\s*:\s*.+$/;
+  const matching = normalized.filter((line) => messagePattern.test(line));
+  if (matching.length < 2) {
+    throw new Error('KakaoTalk export format is invalid or unsupported.');
+  }
+}
+
 function createAuditEvent(
   state: AinderState,
   counters: Map<string, number>,
@@ -728,6 +746,7 @@ export function createAinderStore(opts: CreateAinderStoreOptions = {}): AinderSt
     uploadKakaoTxt({ fileName, fileText = DEFAULT_SAMPLE, retainRawUpload = state.retainRawUploads }) {
       if (!fileName.endsWith('.txt')) throw new Error('Only KakaoTalk .txt exports are accepted.');
       if (Buffer.byteLength(fileText, 'utf8') > 2 * 1024 * 1024) throw new Error('KakaoTalk export exceeds 2MB upload limit.');
+      validateKakaoExport(fileText);
       const upload: ConversationUpload = {
         id: nextId('upload', counters),
         userId: state.currentUserId,

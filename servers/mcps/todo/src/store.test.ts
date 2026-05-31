@@ -22,6 +22,18 @@ test('provider egress is blocked while raw upload lifecycle is unresolved', () =
   assert.equal(audit?.type, 'provider.egress_blocked');
 });
 
+test('upload rejects malformed KakaoTalk exports', () => {
+  const store = createAinderStore({ seedDemo: true });
+  assert.throws(
+    () =>
+      store.uploadKakaoTxt({
+        fileName: 'broken.txt',
+        fileText: 'hello\\nworld',
+      }),
+    /format is invalid|too short/,
+  );
+});
+
 test('store request context is written into audit and provider records', () => {
   const store = createAinderStore({ seedDemo: true });
   store.setRequestContext('req-123');
