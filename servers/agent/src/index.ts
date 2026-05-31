@@ -124,6 +124,8 @@ const bootstrapPasswordHash =
   hashBootstrapPassword(process.env.AINDER_BOOTSTRAP_PASSWORD?.trim() || 'demo');
 const sessionSecret = process.env.AINDER_SESSION_SECRET?.trim() || randomBytes(32).toString('base64url');
 const sessionStoreFile = process.env.AINDER_SESSION_STORE_PATH?.trim();
+const authRateLimit = Number.parseInt(process.env.AINDER_AUTH_RATE_LIMIT ?? (isProduction ? '10' : '100'), 10);
+const authRateWindowMs = Number.parseInt(process.env.AINDER_AUTH_RATE_WINDOW_MS ?? '60000', 10);
 
 startServer({
   port: PORT,
@@ -136,6 +138,8 @@ startServer({
     storeFile: sessionStoreFile,
     secureCookies: isProduction,
     allowedOrigins,
+    authRateLimit,
+    authRateWindowMs,
   }),
   ...(MODEL ? { model: MODEL } : {}),
   ...(systemPrompt !== undefined ? { systemPrompt } : {}),

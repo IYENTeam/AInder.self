@@ -26,6 +26,8 @@ interface CookieSessionAuthOptions {
   readonly storeFile?: string;
   readonly secureCookies: boolean;
   readonly allowedOrigins: ReadonlySet<string>;
+  readonly authRateLimit: number;
+  readonly authRateWindowMs: number;
 }
 
 interface SessionRecord {
@@ -34,6 +36,11 @@ interface SessionRecord {
   readonly csrfToken: string;
   readonly createdAt: number;
   readonly expiresAt: number;
+}
+
+interface RateBucket {
+  count: number;
+  resetAt: number;
 }
 
 const SESSION_COOKIE = 'ainder_sid';
@@ -57,6 +64,7 @@ export async function startServer(opts: ServerOptions): Promise<AgentServerHandl
 
 export function createCookieSessionAuth(opts: CookieSessionAuthOptions): AuthAdapter {
   let sessions = loadSessions(opts.storeFile).filter((s) => s.expiresAt > Date.now());
+  const authBuckets = new Map<string, RateBucket>();
 
   const persist = () => {
     if (!opts.storeFile) return;
@@ -67,6 +75,23 @@ export function createCookieSessionAuth(opts: CookieSessionAuthOptions): AuthAda
   const rejectOrigin = (req: Request): boolean => {
     const origin = req.headers.get('origin');
     return origin !== null && opts.allowedOrigins.size > 0 && !opts.allowedOrigins.has(origin);
+  };
+
+  const consumeAuthRateLimit = (req: Request, subject: string): boolean => {
+    const actor =
+      req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
+      req.headers.get('cf-connecting-ip') ??
+      'unknown';
+    const key = `${actor}:${subject}`;
+    const now = Date.now();
+    const current = authBuckets.get(key);
+    const bucket =
+      current && current.resetAt > now
+        ? current
+        : { count: 0, resetAt: now + opts.authRateWindowMs };
+    bucket.count += 1;
+    authBuckets.set(key, bucket);
+    return bucket.count <= opts.authRateLimit;
   };
 
   const headersFor = (req: Request, requestId: string): Record<string, string> => {
@@ -131,6 +156,9 @@ export function createCookieSessionAuth(opts: CookieSessionAuthOptions): AuthAda
           const body = await parseRequestJson(c);
           const userId = typeof body.userId === 'string' ? body.userId : '';
           const password = typeof body.password === 'string' ? body.password : '';
+          if (!consumeAuthRateLimit(req, userId || 'anonymous')) {
+            return c.json({ error: 'rate_limited' }, 429, headersFor(req, requestId));
+          }
           if (userId !== opts.userId || !verifyPassword(password, opts.passwordHash)) {
             return c.json({ error: 'invalid_credentials' }, 401, headersFor(req, requestId));
           }

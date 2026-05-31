@@ -24,6 +24,8 @@ test('cookie-session auth issues csrf token and enforces it on authenticated POS
       storeFile,
       secureCookies: false,
       allowedOrigins: new Set(['https://app.example.com']),
+      authRateLimit: 5,
+      authRateWindowMs: 60_000,
     });
 
     const routes = new Map<string, RouteHandler>();
@@ -113,6 +115,8 @@ test('cookie-session auth rejects disallowed origins', async () => {
     passwordHash: hashPassword('secret-pass'),
     secureCookies: false,
     allowedOrigins: new Set(['https://app.example.com']),
+    authRateLimit: 5,
+    authRateWindowMs: 60_000,
   });
 
   const routes = new Map<string, RouteHandler>();
@@ -134,6 +138,55 @@ test('cookie-session auth rejects disallowed origins', async () => {
   });
   assert.equal(login.status, 403);
   assert.equal(login.body.error, 'origin_not_allowed');
+});
+
+test('login route is rate limited by actor and subject window', async () => {
+  const auth = createCookieSessionAuth({
+    sessionSecret: 'abcdefghijklmnopqrstuvwxyz012345',
+    userId: 'admin',
+    passwordHash: hashPassword('secret-pass'),
+    secureCookies: false,
+    allowedOrigins: new Set(['https://app.example.com']),
+    authRateLimit: 2,
+    authRateWindowMs: 60_000,
+  });
+
+  const routes = new Map<string, RouteHandler>();
+  const router: TestMountRouter = {
+    get(path: string, handler: RouteHandler) {
+      routes.set(`GET ${path}`, handler);
+    },
+    post(path: string, handler: RouteHandler) {
+      routes.set(`POST ${path}`, handler);
+    },
+  };
+  assert.ok(auth.mount, 'auth adapter should expose mount');
+  auth.mount(router as never);
+
+  const headers = { 'x-forwarded-for': '203.0.113.10' };
+  const first = await invoke(routes, 'POST /auth/login', {
+    url: 'https://agent.example.com/auth/login',
+    origin: 'https://app.example.com',
+    headers,
+    json: { userId: 'admin', password: 'secret-pass' },
+  });
+  const second = await invoke(routes, 'POST /auth/login', {
+    url: 'https://agent.example.com/auth/login',
+    origin: 'https://app.example.com',
+    headers,
+    json: { userId: 'admin', password: 'secret-pass' },
+  });
+  const third = await invoke(routes, 'POST /auth/login', {
+    url: 'https://agent.example.com/auth/login',
+    origin: 'https://app.example.com',
+    headers,
+    json: { userId: 'admin', password: 'secret-pass' },
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(third.status, 429);
+  assert.equal(third.body.error, 'rate_limited');
 });
 
 function hashPassword(password: string): string {
